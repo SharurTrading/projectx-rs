@@ -5,20 +5,26 @@ use std::{fmt, sync::Arc, time::Duration};
 use futures_util::StreamExt as _;
 use reqwest::{Method, Proxy, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Account, AccountId, Bar, CancelOrder, CloseContract, Contract, Credentials, Endpoints, Error,
-    HistoryRequest, ModifyOrder, OperationResponse, Order, OrderResponse, OrderSearch, PlaceOrder,
-    Position, ProviderError, SearchContracts, Trade, TradeSearch,
+    HistoryRequest, Hub, ModifyOrder, OperationResponse, Order, OrderResponse, OrderSearch,
+    PartialCloseContract, PlaceOrder, Position, ProviderError, RealtimeClient, SearchContracts,
+    Trade, TradeSearch,
     models::{
-        AccountsBody, BarsBody, ContractsBody, EmptyBody, Envelope, OrdersBody, PlaceOrderBody,
-        PositionsBody, TradesBody,
+        AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrdersBody,
+        PlaceOrderBody, PositionsBody, TradesBody,
     },
     token::TokenStore,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
 const USER_AGENT: &str = "projectx-client/0.1.0";
 
 /// Authenticated `ProjectX` REST client.
@@ -26,17 +32,28 @@ const USER_AGENT: &str = "projectx-client/0.1.0";
 /// The client uses the caller's Tokio runtime and keeps its bearer token
 /// private. Call [`Client::authenticate`] before calling authenticated methods.
 pub struct Client {
-    credentials: Credentials,
+    credentials: Arc<Credentials>,
     endpoints: Endpoints,
     http: reqwest::Client,
     token: Arc<TokenStore>,
     response_limit: usize,
+    max_retries: u32,
+    retry_initial: Duration,
+    retry_max: Duration,
 }
 
 impl Client {
     /// Starts configuring a client with explicit credentials.
     pub fn builder(credentials: Credentials) -> ClientBuilder {
         ClientBuilder::new(credentials)
+    }
+
+    /// Creates a real-time client sharing this client's rotating bearer token.
+    ///
+    /// The returned hub snapshots the current token immediately before every
+    /// initial connection and reconnect. Call [`Self::authenticate`] first.
+    pub fn realtime(&self, hub: Hub) -> RealtimeClient {
+        RealtimeClient::new(hub, self.endpoints.clone(), Arc::clone(&self.token))
     }
 
     /// Authenticates with `/api/Auth/loginKey` and stores the returned token.
@@ -62,6 +79,47 @@ impl Client {
         let token = validate_token(response.token.as_deref())?;
         self.token.set(token).await;
         Ok(())
+    }
+
+    /// Authenticates and starts periodic token validation.
+    ///
+    /// The validator is cancelled when the returned guard is dropped. Prefer
+    /// [`SessionValidator::shutdown`] when graceful task completion matters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a zero validation period or when authentication
+    /// fails.
+    pub async fn authenticate_with_validation(
+        &self,
+        period: Duration,
+    ) -> Result<SessionValidator, Error> {
+        if period.is_zero() {
+            return Err(Error::Configuration(
+                "validation period must be non-zero".to_owned(),
+            ));
+        }
+        self.authenticate().await?;
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let client = self.clone();
+        let task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            loop {
+                tokio::select! {
+                    () = task_cancellation.cancelled() => break,
+                    _ = ticker.tick() => {
+                        if let Err(error) = client.validate_session().await {
+                            tracing::warn!(%error, "ProjectX token validation failed");
+                        }
+                    }
+                }
+            }
+        });
+        Ok(SessionValidator {
+            cancellation,
+            task: Some(task),
+        })
     }
 
     /// Validates the current bearer token and applies provider token rotation.
@@ -133,6 +191,18 @@ impl Client {
         Ok(accepted(response)?.contracts)
     }
 
+    /// Retrieves one contract by its explicit provider identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for authentication, transport, provider, or decode failures.
+    pub async fn contract_by_id(&self, contract_id: &crate::ContractId) -> Result<Contract, Error> {
+        let response: Envelope<ContractBody> = self
+            .post_authenticated("api/Contract/searchById", &ContractRequest { contract_id })
+            .await?;
+        Ok(accepted(response)?.contract)
+    }
+
     /// Retrieves historical bars for an explicit provider contract.
     ///
     /// # Errors
@@ -176,8 +246,8 @@ impl Client {
 
     /// Places an order exactly once.
     ///
-    /// This method never retries. A transport failure is returned as
-    /// [`Error::AmbiguousOrderOutcome`]; callers must reconcile open and recent
+    /// This method never retries. An untrustworthy response is returned as
+    /// [`Error::AmbiguousMutation`]; callers must reconcile open and recent
     /// orders before deciding whether another submission is safe.
     ///
     /// # Errors
@@ -190,11 +260,10 @@ impl Client {
                 "order size must be positive".to_owned(),
             ));
         }
-        let response: Envelope<PlaceOrderBody> =
-            match self.post_authenticated("api/Order/place", request).await {
-                Err(Error::Transport(source)) => return Err(Error::AmbiguousOrderOutcome(source)),
-                result => result?,
-            };
+        let response: Envelope<PlaceOrderBody> = self
+            .post_authenticated_no_retry("api/Order/place", request)
+            .await
+            .map_err(|error| ambiguous_mutation("order placement", error))?;
         let body = accepted(response)?;
         let order_id = body.order_id.ok_or_else(|| {
             Error::Authentication("provider accepted an order without returning its ID".to_owned())
@@ -208,7 +277,8 @@ impl Client {
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn cancel_order(&self, request: &CancelOrder) -> Result<OperationResponse, Error> {
-        self.operation("api/Order/cancel", request).await
+        self.mutation("order cancellation", "api/Order/cancel", request)
+            .await
     }
 
     /// Modifies an open order.
@@ -227,7 +297,8 @@ impl Client {
                 "modify order requires at least one replacement value".to_owned(),
             ));
         }
-        self.operation("api/Order/modify", request).await
+        self.mutation("order modification", "api/Order/modify", request)
+            .await
     }
 
     /// Searches currently open positions for an account.
@@ -254,7 +325,31 @@ impl Client {
         &self,
         request: &CloseContract,
     ) -> Result<OperationResponse, Error> {
-        self.operation("api/Position/closeContract", request).await
+        self.mutation("position close", "api/Position/closeContract", request)
+            .await
+    }
+
+    /// Partially closes an open position for an account and contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when size is not positive, or for authentication,
+    /// transport, provider, and decode failures.
+    pub async fn partial_close_contract(
+        &self,
+        request: &PartialCloseContract,
+    ) -> Result<OperationResponse, Error> {
+        if request.size <= 0 {
+            return Err(Error::Configuration(
+                "partial close size must be positive".to_owned(),
+            ));
+        }
+        self.mutation(
+            "partial position close",
+            "api/Position/partialCloseContract",
+            request,
+        )
+        .await
     }
 
     /// Searches executions for an account and time range.
@@ -268,11 +363,19 @@ impl Client {
         Ok(accepted(response)?.trades)
     }
 
-    async fn operation<T>(&self, path: &str, request: &T) -> Result<OperationResponse, Error>
+    async fn mutation<T>(
+        &self,
+        operation: &'static str,
+        path: &str,
+        request: &T,
+    ) -> Result<OperationResponse, Error>
     where
         T: Serialize + ?Sized,
     {
-        let response: Envelope<EmptyBody> = self.post_authenticated(path, request).await?;
+        let response: Envelope<EmptyBody> =
+            self.post_authenticated_no_retry(path, request)
+                .await
+                .map_err(|error| ambiguous_mutation(operation, error))?;
         accepted(response)?;
         Ok(OperationResponse)
     }
@@ -298,13 +401,42 @@ impl Client {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
+        let mut attempt = 0;
+        let mut delay = self.retry_initial;
+        loop {
+            match self.post_authenticated_once(path, &encoded).await {
+                Ok(response) => return Ok(response),
+                Err(error) if attempt < self.max_retries && should_retry(&error) => {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2).min(self.retry_max);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn post_authenticated_no_retry<T, R>(&self, path: &str, body: &T) -> Result<R, Error>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
+        self.post_authenticated_once(path, &encoded).await
+    }
+
+    async fn post_authenticated_once<R>(&self, path: &str, body: &[u8]) -> Result<R, Error>
+    where
+        R: DeserializeOwned,
+    {
         let token = self.token.snapshot().await.ok_or(Error::NotAuthenticated)?;
         let url = self.endpoints.api_url(path)?;
         let response = self
             .http
             .request(Method::POST, url)
             .bearer_auth(token)
-            .json(body)
+            .body(body.to_vec())
             .send()
             .await
             .map_err(Error::Transport)?;
@@ -315,7 +447,12 @@ impl Client {
     where
         R: DeserializeOwned,
     {
-        let response = response.error_for_status().map_err(Error::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::UnexpectedStatus {
+                status: status.as_u16(),
+            });
+        }
         if response
             .content_length()
             .is_some_and(|length| length > self.response_limit as u64)
@@ -346,7 +483,58 @@ impl fmt::Debug for Client {
             .field("credentials", &self.credentials)
             .field("endpoints", &self.endpoints)
             .field("response_limit", &self.response_limit)
+            .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
+    }
+}
+
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        Self {
+            credentials: Arc::clone(&self.credentials),
+            endpoints: self.endpoints.clone(),
+            http: self.http.clone(),
+            token: Arc::clone(&self.token),
+            response_limit: self.response_limit,
+            max_retries: self.max_retries,
+            retry_initial: self.retry_initial,
+            retry_max: self.retry_max,
+        }
+    }
+}
+
+/// Guard for a periodic token-validation task.
+#[must_use = "dropping the validator cancels periodic token validation"]
+pub struct SessionValidator {
+    cancellation: CancellationToken,
+    task: Option<JoinHandle<()>>,
+}
+
+impl SessionValidator {
+    /// Cancels validation and waits for its task to finish.
+    pub async fn shutdown(mut self) {
+        self.cancellation.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl fmt::Debug for SessionValidator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionValidator")
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for SessionValidator {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -358,6 +546,9 @@ pub struct ClientBuilder {
     timeout: Duration,
     response_limit: usize,
     proxy: Option<String>,
+    max_retries: u32,
+    retry_initial: Duration,
+    retry_max: Duration,
 }
 
 impl ClientBuilder {
@@ -368,6 +559,9 @@ impl ClientBuilder {
             timeout: DEFAULT_TIMEOUT,
             response_limit: DEFAULT_RESPONSE_LIMIT,
             proxy: None,
+            max_retries: DEFAULT_MAX_RETRIES,
+            retry_initial: DEFAULT_RETRY_INITIAL,
+            retry_max: DEFAULT_RETRY_MAX,
         }
     }
 
@@ -395,6 +589,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets the number of retries for read/query requests.
+    ///
+    /// Money-moving mutations are never retried.
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Sets the initial and maximum exponential retry delays.
+    pub fn retry_delays(mut self, initial: Duration, maximum: Duration) -> Self {
+        self.retry_initial = initial;
+        self.retry_max = maximum;
+        self
+    }
+
     /// Builds the client without performing network I/O.
     ///
     /// # Errors
@@ -402,9 +611,13 @@ impl ClientBuilder {
     /// Returns an error for zero timeout/response limits, an invalid proxy, or
     /// a transport configuration failure.
     pub fn build(self) -> Result<Client, Error> {
-        if self.timeout.is_zero() || self.response_limit == 0 {
+        if self.timeout.is_zero()
+            || self.response_limit == 0
+            || self.retry_initial.is_zero()
+            || self.retry_max < self.retry_initial
+        {
             return Err(Error::Configuration(
-                "timeout and response limit must be non-zero".to_owned(),
+                "timeout, response limit, and retry delays must be valid and non-zero".to_owned(),
             ));
         }
         let mut headers = header::HeaderMap::new();
@@ -429,11 +642,14 @@ impl ClientBuilder {
         }
         let http = builder.build().map_err(Error::Transport)?;
         Ok(Client {
-            credentials: self.credentials,
+            credentials: Arc::new(self.credentials),
             endpoints: self.endpoints,
             http,
             token: Arc::new(TokenStore::default()),
             response_limit: self.response_limit,
+            max_retries: self.max_retries,
+            retry_initial: self.retry_initial,
+            retry_max: self.retry_max,
         })
     }
 }
@@ -459,6 +675,24 @@ fn validate_token(raw: Option<&str>) -> Result<String, Error> {
         Error::Authentication("provider returned an invalid bearer token".to_owned())
     })?;
     Ok(token.to_owned())
+}
+
+fn should_retry(error: &Error) -> bool {
+    match error {
+        Error::Transport(error) => error.is_timeout() || error.is_connect(),
+        Error::UnexpectedStatus { status } => *status == 429 || *status >= 500,
+        _ => false,
+    }
+}
+
+fn ambiguous_mutation(operation: &'static str, error: Error) -> Error {
+    match error {
+        Error::Provider(_)
+        | Error::NotAuthenticated
+        | Error::Configuration(_)
+        | Error::Encode(_) => error,
+        _ => Error::AmbiguousMutation { operation },
+    }
 }
 
 #[derive(Serialize)]
@@ -499,6 +733,12 @@ struct AvailableContractsRequest {
 #[serde(rename_all = "camelCase")]
 struct AccountRequest {
     account_id: AccountId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContractRequest<'a> {
+    contract_id: &'a crate::ContractId,
 }
 
 #[derive(Serialize)]

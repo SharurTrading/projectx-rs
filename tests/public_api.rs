@@ -1,7 +1,9 @@
 //! Public-API contract tests using synthetic local fixtures.
 
 use httpmock::prelude::*;
-use projectx_client::{AccountId, Client, ContractId, Credentials, Decimal, Endpoints, Error};
+use projectx_client::{
+    AccountId, Client, ContractId, Credentials, Decimal, Endpoints, Error, Side,
+};
 use serde_json::json;
 
 fn fixture_client(server: &MockServer) -> Client {
@@ -90,6 +92,14 @@ fn credentials_are_redacted_and_identifiers_validate() {
         ContractId::new(" padded "),
         Err(Error::InvalidIdentifier { .. })
     ));
+}
+
+#[test]
+fn unknown_provider_enum_codes_remain_observable() {
+    let side: Side = serde_json::from_str("99")
+        .unwrap_or_else(|error| panic!("unknown wire code must remain decodable: {error}"));
+    assert_eq!(side, Side::Unknown(99));
+    assert_eq!(side.code(), 99);
 }
 
 #[tokio::test]

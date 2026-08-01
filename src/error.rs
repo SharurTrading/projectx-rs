@@ -37,6 +37,12 @@ pub enum Error {
     /// The HTTP transport failed.
     #[error("HTTP transport failed")]
     Transport(#[source] reqwest::Error),
+    /// The provider returned a non-successful HTTP status.
+    #[error("provider returned HTTP status {status}")]
+    UnexpectedStatus {
+        /// Numeric HTTP status code.
+        status: u16,
+    },
     /// A URL could not be constructed.
     #[error("invalid endpoint URL")]
     Url(#[source] url::ParseError),
@@ -49,7 +55,14 @@ pub enum Error {
     /// A provider response could not be decoded.
     #[error("provider response was not valid JSON")]
     Decode(#[source] serde_json::Error),
-    /// Order placement may have reached the provider, but no response was received.
-    #[error("order placement outcome is ambiguous; reconcile orders before retrying")]
-    AmbiguousOrderOutcome(#[source] reqwest::Error),
+    /// A request could not be encoded as JSON.
+    #[error("request could not be encoded as JSON")]
+    Encode(#[source] serde_json::Error),
+    /// A money-moving mutation may have reached the provider but did not
+    /// produce a trustworthy response.
+    #[error("{operation} outcome is ambiguous; reconcile provider state before retrying")]
+    AmbiguousMutation {
+        /// Public-safe operation name.
+        operation: &'static str,
+    },
 }

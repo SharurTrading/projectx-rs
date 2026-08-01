@@ -26,16 +26,21 @@ mod credentials;
 mod error;
 mod ids;
 mod models;
+mod realtime;
 mod token;
 
-pub use client::{Client, ClientBuilder};
+pub use client::{Client, ClientBuilder, SessionValidator};
 pub use config::Endpoints;
 pub use credentials::Credentials;
 pub use error::{Error, ProviderError};
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 pub use models::{
-    Account, Bar, BarUnit, Bracket, CancelOrder, CloseContract, Contract, HistoryRequest,
-    ModifyOrder, OperationResponse, Order, OrderResponse, OrderSearch, OrderType, PlaceOrder,
-    Position, SearchContracts, Side, Trade, TradeSearch,
+    Account, Bar, BarUnit, Bracket, CancelOrder, CloseContract, Contract, DepthType,
+    HistoryRequest, MarketDepth, MarketQuote, MarketTrade, ModifyOrder, OperationResponse, Order,
+    OrderResponse, OrderSearch, OrderType, PartialCloseContract, PlaceOrder, Position,
+    PositionType, SearchContracts, Side, Trade, TradeSearch,
+};
+pub use realtime::{
+    Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, SignalRInvocation,
 };
 pub use rust_decimal::Decimal;

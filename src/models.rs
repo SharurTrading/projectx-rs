@@ -7,33 +7,243 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use crate::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 
 /// A `ProjectX` order side.
-#[derive(Clone, Copy, Debug, Deserialize_repr, Eq, PartialEq, Serialize_repr)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-#[repr(i32)]
 pub enum Side {
     /// Bid (buy).
-    Bid = 0,
+    Bid,
     /// Ask (sell).
-    Ask = 1,
+    Ask,
+    /// Provider code not known to this crate version.
+    Unknown(i32),
+}
+
+impl Side {
+    /// Returns the provider's numeric wire code.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Bid => 0,
+            Self::Ask => 1,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+impl Serialize for Side {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_i32(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for Side {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match i32::deserialize(deserializer)? {
+            0 => Self::Bid,
+            1 => Self::Ask,
+            code => Self::Unknown(code),
+        })
+    }
 }
 
 /// A `ProjectX` order type.
-#[derive(Clone, Copy, Debug, Deserialize_repr, Eq, PartialEq, Serialize_repr)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-#[repr(i32)]
 pub enum OrderType {
     /// Limit order.
-    Limit = 1,
+    Limit,
     /// Market order.
-    Market = 2,
+    Market,
     /// Stop order.
-    Stop = 4,
+    Stop,
     /// Trailing-stop order.
-    TrailingStop = 5,
+    TrailingStop,
     /// Join the best bid.
-    JoinBid = 6,
+    JoinBid,
     /// Join the best ask.
-    JoinAsk = 7,
+    JoinAsk,
+    /// Provider code not known to this crate version.
+    Unknown(i32),
+}
+
+impl OrderType {
+    /// Returns the provider's numeric wire code.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Limit => 1,
+            Self::Market => 2,
+            Self::Stop => 4,
+            Self::TrailingStop => 5,
+            Self::JoinBid => 6,
+            Self::JoinAsk => 7,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+impl Serialize for OrderType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_i32(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match i32::deserialize(deserializer)? {
+            1 => Self::Limit,
+            2 => Self::Market,
+            4 => Self::Stop,
+            5 => Self::TrailingStop,
+            6 => Self::JoinBid,
+            7 => Self::JoinAsk,
+            code => Self::Unknown(code),
+        })
+    }
+}
+
+/// A `ProjectX` position direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PositionType {
+    /// No directional position.
+    Undefined,
+    /// Net long position.
+    Long,
+    /// Net short position.
+    Short,
+    /// Provider code not known to this crate version.
+    Unknown(i32),
+}
+
+impl PositionType {
+    /// Returns the provider's numeric wire code.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Undefined => 0,
+            Self::Long => 1,
+            Self::Short => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+impl Serialize for PositionType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_i32(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for PositionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match i32::deserialize(deserializer)? {
+            0 => Self::Undefined,
+            1 => Self::Long,
+            2 => Self::Short,
+            code => Self::Unknown(code),
+        })
+    }
+}
+
+/// A `ProjectX` depth-of-market update kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DepthType {
+    /// Provider sentinel with no book mutation.
+    Unknown,
+    /// Resting ask level.
+    Ask,
+    /// Resting bid level.
+    Bid,
+    /// Best ask update.
+    BestAsk,
+    /// Best bid update.
+    BestBid,
+    /// Trade notification carried on the depth stream.
+    Trade,
+    /// Full book reset.
+    Reset,
+    /// Session-low notification.
+    Low,
+    /// Session-high notification.
+    High,
+    /// New best bid.
+    NewBestBid,
+    /// New best ask.
+    NewBestAsk,
+    /// Fill notification carried on the depth stream.
+    Fill,
+    /// Provider code not known to this crate version.
+    UnknownCode(i32),
+}
+
+impl DepthType {
+    /// Returns the provider's numeric wire code.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Unknown => 0,
+            Self::Ask => 1,
+            Self::Bid => 2,
+            Self::BestAsk => 3,
+            Self::BestBid => 4,
+            Self::Trade => 5,
+            Self::Reset => 6,
+            Self::Low => 7,
+            Self::High => 8,
+            Self::NewBestBid => 9,
+            Self::NewBestAsk => 10,
+            Self::Fill => 11,
+            Self::UnknownCode(code) => code,
+        }
+    }
+}
+
+impl Serialize for DepthType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_i32(self.code())
+    }
+}
+
+impl<'de> Deserialize<'de> for DepthType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match i32::deserialize(deserializer)? {
+            0 => Self::Unknown,
+            1 => Self::Ask,
+            2 => Self::Bid,
+            3 => Self::BestAsk,
+            4 => Self::BestBid,
+            5 => Self::Trade,
+            6 => Self::Reset,
+            7 => Self::Low,
+            8 => Self::High,
+            9 => Self::NewBestBid,
+            10 => Self::NewBestAsk,
+            11 => Self::Fill,
+            code => Self::UnknownCode(code),
+        })
+    }
 }
 
 /// Historical-bar aggregation unit.
@@ -64,7 +274,7 @@ pub struct Account {
     /// Provider display name.
     pub name: String,
     /// Current account balance, when included by the endpoint.
-    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
     pub balance: Option<Decimal>,
     /// Whether the provider permits trading.
     pub can_trade: bool,
@@ -86,10 +296,10 @@ pub struct Contract {
     /// Human-readable description.
     pub description: String,
     /// Minimum price increment.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub tick_size: Decimal,
     /// Monetary value of one tick.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub tick_value: Decimal,
     /// Whether this is the provider's active contract.
     pub active_contract: bool,
@@ -135,16 +345,16 @@ pub struct Bar {
     /// Provider timestamp.
     pub t: String,
     /// Open price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub o: Decimal,
     /// High price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub h: Decimal,
     /// Low price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub l: Decimal,
     /// Close price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub c: Decimal,
     /// Provider volume units.
     pub v: i64,
@@ -190,16 +400,16 @@ pub struct Order {
     /// Ordered quantity.
     pub size: i64,
     /// Optional limit price.
-    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
     pub limit_price: Option<Decimal>,
     /// Optional stop price.
-    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
     pub stop_price: Option<Decimal>,
     /// Optional cumulative filled quantity.
     #[serde(default)]
     pub fill_volume: Option<i64>,
     /// Optional average fill price.
-    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
     pub filled_price: Option<Decimal>,
     /// Optional caller tag.
     #[serde(default)]
@@ -235,19 +445,19 @@ pub struct PlaceOrder {
     /// Optional limit price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub limit_price: Option<Decimal>,
     /// Optional stop price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub stop_price: Option<Decimal>,
     /// Optional trailing price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub trail_price: Option<Decimal>,
     /// Optional caller tag. It must be unique within the account.
@@ -292,19 +502,19 @@ pub struct ModifyOrder {
     /// Optional replacement limit price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub limit_price: Option<Decimal>,
     /// Optional replacement stop price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub stop_price: Option<Decimal>,
     /// Optional replacement trailing price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::float_option"
+        with = "rust_decimal::serde::arbitrary_precision_option"
     )]
     pub trail_price: Option<Decimal>,
 }
@@ -317,6 +527,18 @@ pub struct CloseContract {
     pub account_id: AccountId,
     /// Provider contract.
     pub contract_id: ContractId,
+}
+
+/// Partial-position close parameters.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialCloseContract {
+    /// Provider account.
+    pub account_id: AccountId,
+    /// Provider contract.
+    pub contract_id: ContractId,
+    /// Positive quantity to close.
+    pub size: i64,
 }
 
 /// A `ProjectX` open position.
@@ -333,11 +555,11 @@ pub struct Position {
     pub creation_timestamp: String,
     /// Provider position-type code.
     #[serde(rename = "type")]
-    pub position_type: i32,
+    pub position_type: PositionType,
     /// Signed or directional provider quantity.
     pub size: i64,
     /// Average entry price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub average_price: Decimal,
 }
 
@@ -367,13 +589,13 @@ pub struct Trade {
     /// Provider creation timestamp.
     pub creation_timestamp: String,
     /// Execution price.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub price: Decimal,
     /// Optional realized P&L.
-    #[serde(default, with = "rust_decimal::serde::float_option")]
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
     pub profit_and_loss: Option<Decimal>,
     /// Provider fees.
-    #[serde(with = "rust_decimal::serde::float")]
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
     pub fees: Decimal,
     /// Execution side.
     pub side: Side,
@@ -385,18 +607,135 @@ pub struct Trade {
     pub order_id: OrderId,
 }
 
+/// Consolidated quote from the market hub.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketQuote {
+    /// Provider symbol identifier.
+    #[serde(alias = "symbol")]
+    pub raw_symbol: SymbolId,
+    /// Human-readable symbol name, when supplied.
+    #[serde(default)]
+    pub symbol_name: Option<String>,
+    /// Last trade price.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub last_price: Decimal,
+    /// Best bid price.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub best_bid: Decimal,
+    /// Best ask price.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub best_ask: Decimal,
+    /// Session price change.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub change: Decimal,
+    /// Session percent change.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub change_percent: Decimal,
+    /// Session open.
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub open: Option<Decimal>,
+    /// Session high.
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub high: Option<Decimal>,
+    /// Session low.
+    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    pub low: Option<Decimal>,
+    /// Session cumulative volume.
+    pub volume: i64,
+    /// Provider last-updated timestamp.
+    pub last_updated: String,
+    /// Event timestamp.
+    pub timestamp: String,
+}
+
+/// Depth-of-market update from the market hub.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketDepth {
+    /// Provider symbol identifier, when supplied.
+    #[serde(default, alias = "symbolId")]
+    pub symbol_id: Option<SymbolId>,
+    /// Event timestamp.
+    pub timestamp: String,
+    /// Provider depth event code.
+    #[serde(rename = "type")]
+    pub depth_type: DepthType,
+    /// Price level.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub price: Decimal,
+    /// Incremental volume for the update.
+    pub volume: i64,
+    /// Resting volume after the update.
+    pub current_volume: i64,
+    /// Zero-based level index, when supplied.
+    #[serde(default)]
+    pub index: Option<i32>,
+}
+
+/// Trade print from the market hub.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketTrade {
+    /// Provider symbol identifier.
+    pub symbol_id: SymbolId,
+    /// Trade price.
+    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    pub price: Decimal,
+    /// Event timestamp.
+    pub timestamp: String,
+    /// Provider trade-log code.
+    #[serde(rename = "type")]
+    pub trade_type: i32,
+    /// Trade quantity.
+    pub volume: i64,
+}
+
 /// Successful response for an operation without a result body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationResponse;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub(crate) struct Envelope<T> {
-    #[serde(flatten)]
     pub(crate) body: T,
     pub(crate) success: bool,
-    #[serde(default)]
     pub(crate) error_code: Option<i32>,
+}
+
+impl<'de, T> Deserialize<'de> for Envelope<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut object = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| D::Error::custom("provider response must be an object"))?;
+        let success = object
+            .remove("success")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| D::Error::custom("provider response success flag is missing"))?;
+        let error_code = object
+            .remove("errorCode")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?
+            .flatten();
+        object.remove("errorMessage");
+        let body =
+            serde_json::from_value(serde_json::Value::Object(object)).map_err(D::Error::custom)?;
+        Ok(Self {
+            body,
+            success,
+            error_code,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +746,11 @@ pub(crate) struct AccountsBody {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContractsBody {
     pub(crate) contracts: Vec<Contract>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ContractBody {
+    pub(crate) contract: Contract,
 }
 
 #[derive(Debug, Deserialize)]

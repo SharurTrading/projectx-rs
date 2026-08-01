@@ -10,10 +10,14 @@ are complete.
 
 - No trading-platform or application dependencies.
 - No environment-file loading or credential persistence.
-- Exact `Decimal` values for price, money, and P&L.
+- Exact `Decimal` values for price, money, and P&L, parsed from the provider's
+  JSON digits without an `f64` round-trip.
 - Typed provider identifiers rather than interchangeable strings and integers.
 - A caller-owned Tokio runtime; the library never creates a hidden runtime.
-- Typed errors, redacted credentials, bounded HTTP responses, and no automatic retry for order placement.
+- Typed errors, redacted credentials, bounded HTTP/WebSocket queues, and no
+  automatic retry for money-moving mutations.
+- SignalR market and user hubs with handshake-gated readiness, invocation
+  completions, token-aware reconnects, and explicit transport-gap recovery.
 - Deterministic tests use synthetic local fixtures. Live tests are opt-in and read-only.
 
 ## Quick start
@@ -39,6 +43,61 @@ tokens. See [SECURITY.md](SECURITY.md).
 
 ## Status
 
-The initial private milestone provides the REST session and core account, contract, history, order,
-position, and trade endpoints. SignalR market and user streams will land before public release.
+The private client now covers the complete documented Gateway REST surface:
 
+- API-key login and rotating-token validation
+- active-account discovery
+- contract availability, text search, and lookup by ID
+- historical bars
+- order search, placement, cancellation, and modification
+- open positions, full close, and partial close
+- execution/trade search
+
+It also implements both documented SignalR hubs, market/user subscription helpers,
+bounded event delivery, reconnect notification, and exact provider payload models.
+
+## Real-time example
+
+```rust,no_run
+use projectx_client::{Client, ContractId, Credentials, Hub, RealtimeEvent};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
+client.authenticate().await?;
+
+let realtime = client.realtime(Hub::Market);
+let mut events = realtime
+    .take_event_receiver()
+    .await
+    .ok_or("event receiver was already claimed")?;
+realtime.connect().await?;
+
+let contract = ContractId::new("CON.F.US.MNQ.M26")?;
+realtime.subscribe_contract_trades(&contract).await?;
+
+while let Some(event) = events.recv().await {
+    match event {
+        RealtimeEvent::Reconnected => {
+            // Replay the application's canonical subscription set.
+            realtime.subscribe_contract_trades(&contract).await?;
+        }
+        RealtimeEvent::TransportGap => {
+            // Fence and recover downstream state before acknowledging.
+            events.acknowledge_transport_gap();
+        }
+        _ => {}
+    }
+}
+# Ok(())
+# }
+```
+
+## Deliberate live validation
+
+Normal tests are credential-free. The ignored live probe authenticates, lists
+active accounts and contracts, validates the market SignalR handshake, and
+disconnects without opening the user hub or invoking an order endpoint:
+
+```text
+cargo test --features live-tests --test live_read_only -- --ignored
+```

@@ -39,6 +39,23 @@ impl Endpoints {
             .map_err(Error::Url)
     }
 
+    pub(crate) fn hub_url(&self, hub_path: &str) -> Result<Url, Error> {
+        let mut url = Url::parse(&self.realtime_base).map_err(Error::Url)?;
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            _ => {
+                return Err(Error::Configuration(
+                    "real-time endpoint must use HTTP or HTTPS".to_owned(),
+                ));
+            }
+        };
+        url.set_scheme(scheme).map_err(|()| {
+            Error::Configuration("real-time endpoint scheme could not be changed".to_owned())
+        })?;
+        url.join(&format!("hubs/{hub_path}")).map_err(Error::Url)
+    }
+
     /// Returns the configured REST base URL.
     pub fn api_base(&self) -> &str {
         &self.api_base
