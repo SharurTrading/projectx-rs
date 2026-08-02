@@ -10,6 +10,8 @@ first public release.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-02
+
 ### Fixed
 
 - Preserve exact REST and SignalR decimal tokens without enabling global `rust_decimal` or
