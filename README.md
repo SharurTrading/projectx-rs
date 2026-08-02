@@ -25,6 +25,7 @@ This README documents the additional safety and lifecycle behavior supplied by t
 - A caller-owned Tokio runtime; the library never creates a hidden runtime.
 - Typed errors, redacted credentials, bounded HTTP/WebSocket queues, and no
   automatic retry for money-moving mutations.
+- Shared rolling-window REST limits with explicit local and provider-throttle errors.
 - SignalR market and user hubs with handshake-gated readiness, invocation
   completions, token-aware reconnects, and explicit transport-gap recovery.
 - Deterministic tests use synthetic local fixtures. Live tests are opt-in and read-only.
@@ -192,7 +193,8 @@ The client makes overload and ambiguous execution visible instead of hiding it:
 | Boundary | Behavior |
 | --- | --- |
 | HTTP response body | Streamed under a configurable byte limit; oversized bodies are rejected. |
-| Safe REST queries | Transient failures use configurable bounded exponential backoff. |
+| HTTP redirects | Not followed automatically, keeping one admitted attempt equal to one outbound request. |
+| Safe REST queries | Wait for local rate-limit capacity; transient failures use configurable bounded exponential backoff. |
 | Order and position mutations | Never retried automatically because a timeout can have an ambiguous outcome. |
 | SignalR outbound queue | Bounded; a full queue returns `SendQueueFull` rather than growing without limit. |
 | Pending SignalR invocations | Bounded and completion-correlated; timeout or disconnect fails the caller. |
@@ -209,6 +211,39 @@ configuration, retry counts, and retry delays. Unknown provider enum codes remai
 `Unknown(code)` variants rather than being silently discarded. Prices, quantities, balances, and
 P&L remain `rust_decimal::Decimal` throughout provider decoding. The SignalR codec handles record
 separator framing, messages coalesced with the handshake response, and provider ping/pong traffic.
+
+## REST rate limits
+
+Local rate limiting is enabled by default and follows the documented
+[ProjectX Gateway API](https://gateway.docs.projectx.com/) budgets:
+
+| Endpoint family | Rolling-window budget |
+| --- | --- |
+| `POST /api/History/retrieveBars` | 50 requests per 30 seconds |
+| Every other authenticated REST endpoint | 200 requests per 60 seconds |
+
+The history and general budgets are independent and shared by a `Client` and all of its clones.
+Every actual request attempt consumes capacity, including a retry. API-key login is not counted
+because it is not an authenticated request.
+
+Safe query methods wait asynchronously for capacity without blocking a runtime thread. Rate-limit
+waiting happens before the configured HTTP request timeout starts; wrap the complete method future
+in `tokio::time::timeout` when an application needs an end-to-end deadline.
+
+Money-moving methods never wait in a local throttle queue. If capacity is unavailable, they return
+`Error::LocallyRateLimited`, which guarantees that no request was sent and includes the budget and
+minimum retry delay. If the provider returns HTTP 429 after a mutation was sent, the client does not
+retry and returns `Error::AmbiguousMutation`; reconcile provider state before deciding what to do.
+
+For query responses, HTTP 429 becomes `Error::ProviderRateLimited`. The client accepts both
+delta-seconds and HTTP-date forms of `Retry-After`, applies the longer of that delay and exponential
+backoff, and publishes the cooldown to every clone. Missing or malformed `Retry-After` falls back to
+the configured rolling-window duration.
+
+Custom gateways can replace the defaults with `ClientBuilder::rate_limits`. Call
+`disable_rate_limits()` only when an external coordinator enforces the limits. The built-in state
+cannot coordinate independently constructed clients or separate processes using the same
+credentials; those deployments still require a shared external limiter.
 
 ## Deliberate live validation
 

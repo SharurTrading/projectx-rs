@@ -3,7 +3,11 @@
 
 //! Error types.
 
+use std::time::Duration;
+
 use thiserror::Error;
+
+use crate::RateLimitKind;
 
 /// A provider-declared failed operation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -45,6 +49,22 @@ pub enum Error {
     UnexpectedStatus {
         /// Numeric HTTP status code.
         status: u16,
+    },
+    /// A request was not sent because the shared local budget was exhausted.
+    #[error("local {kind} rate limit is exhausted; retry after {retry_after:?}")]
+    LocallyRateLimited {
+        /// Provider budget that rejected local admission.
+        kind: RateLimitKind,
+        /// Minimum time until this client can admit another request.
+        retry_after: Duration,
+    },
+    /// The provider rejected an authenticated request with HTTP 429.
+    #[error("provider rate limit is exhausted; retry after {retry_after:?}")]
+    ProviderRateLimited {
+        /// Provider budget associated with the rejected endpoint.
+        kind: RateLimitKind,
+        /// Delay from `Retry-After`, or the configured window when absent.
+        retry_after: Duration,
     },
     /// A URL could not be constructed.
     #[error("invalid endpoint URL")]

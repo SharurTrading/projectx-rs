@@ -32,6 +32,10 @@ domain translation.
   overflow behavior. A websocket is not ready until the SignalR handshake is validated.
 - **PX-ORDER-01:** Order placement is not automatically retried because a timeout after submission
   is an ambiguous money-moving outcome. Retry policies must distinguish safe queries from mutations.
+- **PX-RATE-01:** Authenticated REST attempts share strict rolling-window budgets across client
+  clones: history is 50 requests per 30 seconds and all other endpoints are 200 per 60 seconds.
+  Queries may wait asynchronously; mutations fail locally before sending when capacity is exhausted.
+  Provider 429 cooldowns are shared and mutations are never retried automatically.
 - **PX-VALIDATE-01:** Normal CI is deterministic and credential-free. Live tests are ignored,
   read-only, and deliberately invoked.
 

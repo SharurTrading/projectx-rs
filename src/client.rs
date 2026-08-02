@@ -3,10 +3,14 @@
 
 //! Authenticated REST client.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use futures_util::StreamExt as _;
-use reqwest::{Method, Proxy, header};
+use reqwest::{Method, Proxy, header, redirect::Policy};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -14,12 +18,13 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Account, AccountId, Bar, CancelOrder, CloseContract, Contract, Credentials, Endpoints, Error,
     HistoryRequest, Hub, ModifyOrder, OperationResponse, Order, OrderResponse, OrderSearch,
-    PartialCloseContract, PlaceOrder, Position, ProviderError, RealtimeClient, SearchContracts,
-    Trade, TradeSearch,
+    PartialCloseContract, PlaceOrder, Position, ProviderError, RateLimitConfig, RateLimitKind,
+    RealtimeClient, SearchContracts, Trade, TradeSearch,
     models::{
         AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrdersBody,
         PlaceOrderBody, PositionsBody, TradesBody,
     },
+    rate_limit::RateLimits,
     token::TokenStore,
 };
 
@@ -28,17 +33,22 @@ const DEFAULT_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
+const MAX_SERVER_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 const USER_AGENT: &str = "projectx-client/0.1.0";
 
 /// Authenticated `ProjectX` REST client.
 ///
 /// The client uses the caller's Tokio runtime and keeps its bearer token
 /// private. Call [`Client::authenticate`] before calling authenticated methods.
+/// Safe authenticated queries wait asynchronously for shared rate-limit
+/// capacity before their HTTP timeout begins. Money-moving mutations instead
+/// return [`Error::LocallyRateLimited`] without sending when capacity is full.
 pub struct Client {
     credentials: Arc<Credentials>,
     endpoints: Endpoints,
     http: reqwest::Client,
     token: Arc<TokenStore>,
+    rate_limits: Arc<RateLimits>,
     response_limit: usize,
     max_retries: u32,
     retry_initial: Duration,
@@ -112,8 +122,13 @@ impl Client {
                 tokio::select! {
                     () = task_cancellation.cancelled() => break,
                     _ = ticker.tick() => {
-                        if let Err(error) = client.validate_session().await {
-                            tracing::warn!(%error, "ProjectX token validation failed");
+                        tokio::select! {
+                            () = task_cancellation.cancelled() => break,
+                            result = client.validate_session() => {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "ProjectX token validation failed");
+                                }
+                            }
                         }
                     }
                 }
@@ -133,7 +148,11 @@ impl Client {
     /// rejected.
     pub async fn validate_session(&self) -> Result<(), Error> {
         let response: ValidateResponse = self
-            .post_authenticated("api/Auth/validate", &EmptyRequest {})
+            .post_authenticated(
+                RateLimitKind::General,
+                "api/Auth/validate",
+                &EmptyRequest {},
+            )
             .await?;
         if !response.success {
             return Err(Error::Authentication(format!(
@@ -155,6 +174,7 @@ impl Client {
     pub async fn search_active_accounts(&self) -> Result<Vec<Account>, Error> {
         let response: Envelope<AccountsBody> = self
             .post_authenticated(
+                RateLimitKind::General,
                 "api/Account/search",
                 &AccountSearchRequest {
                     only_active_accounts: true,
@@ -172,6 +192,7 @@ impl Client {
     pub async fn available_contracts(&self, live: bool) -> Result<Vec<Contract>, Error> {
         let response: Envelope<ContractsBody> = self
             .post_authenticated(
+                RateLimitKind::General,
                 "api/Contract/available",
                 &AvailableContractsRequest { live },
             )
@@ -189,7 +210,7 @@ impl Client {
         request: &SearchContracts,
     ) -> Result<Vec<Contract>, Error> {
         let response: Envelope<ContractsBody> = self
-            .post_authenticated("api/Contract/search", request)
+            .post_authenticated(RateLimitKind::General, "api/Contract/search", request)
             .await?;
         Ok(accepted(response)?.contracts)
     }
@@ -201,7 +222,11 @@ impl Client {
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn contract_by_id(&self, contract_id: &crate::ContractId) -> Result<Contract, Error> {
         let response: Envelope<ContractBody> = self
-            .post_authenticated("api/Contract/searchById", &ContractRequest { contract_id })
+            .post_authenticated(
+                RateLimitKind::General,
+                "api/Contract/searchById",
+                &ContractRequest { contract_id },
+            )
             .await?;
         Ok(accepted(response)?.contract)
     }
@@ -219,7 +244,7 @@ impl Client {
             ));
         }
         let response: Envelope<BarsBody> = self
-            .post_authenticated("api/History/retrieveBars", request)
+            .post_authenticated(RateLimitKind::History, "api/History/retrieveBars", request)
             .await?;
         Ok(accepted(response)?.bars)
     }
@@ -230,8 +255,9 @@ impl Client {
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn search_orders(&self, request: &OrderSearch) -> Result<Vec<Order>, Error> {
-        let response: Envelope<OrdersBody> =
-            self.post_authenticated("api/Order/search", request).await?;
+        let response: Envelope<OrdersBody> = self
+            .post_authenticated(RateLimitKind::General, "api/Order/search", request)
+            .await?;
         Ok(accepted(response)?.orders)
     }
 
@@ -242,7 +268,11 @@ impl Client {
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn search_open_orders(&self, account_id: AccountId) -> Result<Vec<Order>, Error> {
         let response: Envelope<OrdersBody> = self
-            .post_authenticated("api/Order/searchOpen", &AccountRequest { account_id })
+            .post_authenticated(
+                RateLimitKind::General,
+                "api/Order/searchOpen",
+                &AccountRequest { account_id },
+            )
             .await?;
         Ok(accepted(response)?.orders)
     }
@@ -264,7 +294,7 @@ impl Client {
             ));
         }
         let response: Envelope<PlaceOrderBody> = self
-            .post_authenticated_no_retry("api/Order/place", request)
+            .post_authenticated_no_retry(RateLimitKind::General, "api/Order/place", request)
             .await
             .map_err(|error| ambiguous_mutation("order placement", error))?;
         let body = accepted(response)?;
@@ -314,7 +344,11 @@ impl Client {
         account_id: AccountId,
     ) -> Result<Vec<Position>, Error> {
         let response: Envelope<PositionsBody> = self
-            .post_authenticated("api/Position/searchOpen", &AccountRequest { account_id })
+            .post_authenticated(
+                RateLimitKind::General,
+                "api/Position/searchOpen",
+                &AccountRequest { account_id },
+            )
             .await?;
         Ok(accepted(response)?.positions)
     }
@@ -361,8 +395,9 @@ impl Client {
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn search_trades(&self, request: &TradeSearch) -> Result<Vec<Trade>, Error> {
-        let response: Envelope<TradesBody> =
-            self.post_authenticated("api/Trade/search", request).await?;
+        let response: Envelope<TradesBody> = self
+            .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
+            .await?;
         Ok(accepted(response)?.trades)
     }
 
@@ -375,10 +410,10 @@ impl Client {
     where
         T: Serialize + ?Sized,
     {
-        let response: Envelope<EmptyBody> =
-            self.post_authenticated_no_retry(path, request)
-                .await
-                .map_err(|error| ambiguous_mutation(operation, error))?;
+        let response: Envelope<EmptyBody> = self
+            .post_authenticated_no_retry(RateLimitKind::General, path, request)
+            .await
+            .map_err(|error| ambiguous_mutation(operation, error))?;
         accepted(response)?;
         Ok(OperationResponse)
     }
@@ -399,20 +434,27 @@ impl Client {
         self.decode(response).await
     }
 
-    async fn post_authenticated<T, R>(&self, path: &str, body: &T) -> Result<R, Error>
+    async fn post_authenticated<T, R>(
+        &self,
+        kind: RateLimitKind,
+        path: &str,
+        body: &T,
+    ) -> Result<R, Error>
     where
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
         let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
+        self.require_authentication().await?;
         let mut attempt = 0;
         let mut delay = self.retry_initial;
         loop {
-            match self.post_authenticated_once(path, &encoded).await {
+            self.rate_limits.wait(kind).await;
+            match self.post_authenticated_once(kind, path, &encoded).await {
                 Ok(response) => return Ok(response),
                 Err(error) if attempt < self.max_retries && should_retry(&error) => {
                     attempt += 1;
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(retry_delay(&error, delay)).await;
                     delay = delay.saturating_mul(2).min(self.retry_max);
                 }
                 Err(error) => return Err(error),
@@ -420,16 +462,30 @@ impl Client {
         }
     }
 
-    async fn post_authenticated_no_retry<T, R>(&self, path: &str, body: &T) -> Result<R, Error>
+    async fn post_authenticated_no_retry<T, R>(
+        &self,
+        kind: RateLimitKind,
+        path: &str,
+        body: &T,
+    ) -> Result<R, Error>
     where
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
         let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
-        self.post_authenticated_once(path, &encoded).await
+        self.require_authentication().await?;
+        self.rate_limits
+            .try_acquire(kind)
+            .map_err(|retry_after| Error::LocallyRateLimited { kind, retry_after })?;
+        self.post_authenticated_once(kind, path, &encoded).await
     }
 
-    async fn post_authenticated_once<R>(&self, path: &str, body: &[u8]) -> Result<R, Error>
+    async fn post_authenticated_once<R>(
+        &self,
+        kind: RateLimitKind,
+        path: &str,
+        body: &[u8],
+    ) -> Result<R, Error>
     where
         R: DeserializeOwned,
     {
@@ -443,7 +499,22 @@ impl Client {
             .send()
             .await
             .map_err(Error::Transport)?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
+                .unwrap_or_else(|| self.rate_limits.limit(kind).window())
+                .min(MAX_SERVER_RETRY_AFTER);
+            self.rate_limits.cool_down(kind, retry_after);
+            return Err(Error::ProviderRateLimited { kind, retry_after });
+        }
         self.decode(response).await
+    }
+
+    async fn require_authentication(&self) -> Result<(), Error> {
+        if self.token.is_authenticated().await {
+            Ok(())
+        } else {
+            Err(Error::NotAuthenticated)
+        }
     }
 
     async fn decode<R>(&self, response: reqwest::Response) -> Result<R, Error>
@@ -487,6 +558,7 @@ impl fmt::Debug for Client {
             .field("endpoints", &self.endpoints)
             .field("response_limit", &self.response_limit)
             .field("max_retries", &self.max_retries)
+            .field("rate_limits", &self.rate_limits.config())
             .finish_non_exhaustive()
     }
 }
@@ -498,6 +570,7 @@ impl Clone for Client {
             endpoints: self.endpoints.clone(),
             http: self.http.clone(),
             token: Arc::clone(&self.token),
+            rate_limits: Arc::clone(&self.rate_limits),
             response_limit: self.response_limit,
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
@@ -552,6 +625,7 @@ pub struct ClientBuilder {
     max_retries: u32,
     retry_initial: Duration,
     retry_max: Duration,
+    rate_limits: Option<RateLimitConfig>,
 }
 
 impl ClientBuilder {
@@ -565,6 +639,7 @@ impl ClientBuilder {
             max_retries: DEFAULT_MAX_RETRIES,
             retry_initial: DEFAULT_RETRY_INITIAL,
             retry_max: DEFAULT_RETRY_MAX,
+            rate_limits: Some(RateLimitConfig::default()),
         }
     }
 
@@ -607,6 +682,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Replaces the default `ProjectX` REST rate limits.
+    ///
+    /// The configured budgets are shared by the built [`Client`] and all of
+    /// its clones.
+    pub fn rate_limits(mut self, rate_limits: RateLimitConfig) -> Self {
+        self.rate_limits = Some(rate_limits);
+        self
+    }
+
+    /// Disables local REST rate limiting.
+    ///
+    /// Use this only when an external coordinator enforces the provider limits
+    /// across every client and process using the same credentials. Provider
+    /// HTTP 429 responses still participate in query retry delays.
+    pub fn disable_rate_limits(mut self) -> Self {
+        self.rate_limits = None;
+        self
+    }
+
     /// Builds the client without performing network I/O.
     ///
     /// # Errors
@@ -639,7 +733,8 @@ impl ClientBuilder {
 
         let mut builder = reqwest::Client::builder()
             .default_headers(headers)
-            .timeout(self.timeout);
+            .timeout(self.timeout)
+            .redirect(Policy::none());
         if let Some(proxy) = self.proxy {
             builder = builder.proxy(Proxy::all(proxy).map_err(Error::Transport)?);
         }
@@ -649,6 +744,7 @@ impl ClientBuilder {
             endpoints: self.endpoints,
             http,
             token: Arc::new(TokenStore::default()),
+            rate_limits: Arc::new(RateLimits::new(self.rate_limits)),
             response_limit: self.response_limit,
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
@@ -683,9 +779,31 @@ fn validate_token(raw: Option<&str>) -> Result<String, Error> {
 fn should_retry(error: &Error) -> bool {
     match error {
         Error::Transport(error) => error.is_timeout() || error.is_connect(),
+        Error::ProviderRateLimited { .. } => true,
         Error::UnexpectedStatus { status } => *status == 429 || *status >= 500,
         _ => false,
     }
+}
+
+fn retry_delay(error: &Error, backoff: Duration) -> Duration {
+    match error {
+        Error::ProviderRateLimited { retry_after, .. } => backoff.max(*retry_after),
+        _ => backoff,
+    }
+}
+
+fn parse_retry_after(headers: &header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let raw = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(MAX_SERVER_RETRY_AFTER));
+    }
+    let deadline = httpdate::parse_http_date(raw).ok()?;
+    Some(
+        deadline
+            .duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(MAX_SERVER_RETRY_AFTER),
+    )
 }
 
 fn ambiguous_mutation(operation: &'static str, error: Error) -> Error {
@@ -693,7 +811,8 @@ fn ambiguous_mutation(operation: &'static str, error: Error) -> Error {
         Error::Provider(_)
         | Error::NotAuthenticated
         | Error::Configuration(_)
-        | Error::Encode(_) => error,
+        | Error::Encode(_)
+        | Error::LocallyRateLimited { .. } => error,
         _ => Error::AmbiguousMutation { operation },
     }
 }
@@ -746,3 +865,74 @@ struct ContractRequest<'a> {
 
 #[derive(Serialize)]
 struct EmptyRequest {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::UNIX_EPOCH;
+
+    use super::*;
+
+    #[test]
+    fn retry_after_parses_delta_seconds_and_bounds_hostile_values() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, header::HeaderValue::from_static("45"));
+        assert_eq!(
+            parse_retry_after(&headers, UNIX_EPOCH),
+            Some(Duration::from_secs(45))
+        );
+
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("18446744073709551615"),
+        );
+        assert_eq!(
+            parse_retry_after(&headers, UNIX_EPOCH),
+            Some(MAX_SERVER_RETRY_AFTER)
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_http_dates_without_waiting_for_past_dates() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let future = now + Duration::from_secs(75);
+        let mut headers = header::HeaderMap::new();
+        let future_header = header::HeaderValue::from_str(&httpdate::fmt_http_date(future))
+            .unwrap_or_else(|error| panic!("fixture header must be valid: {error}"));
+        headers.insert(header::RETRY_AFTER, future_header);
+        assert_eq!(
+            parse_retry_after(&headers, now),
+            Some(Duration::from_secs(75))
+        );
+
+        let past_header = header::HeaderValue::from_str(&httpdate::fmt_http_date(UNIX_EPOCH))
+            .unwrap_or_else(|error| panic!("fixture header must be valid: {error}"));
+        headers.insert(header::RETRY_AFTER, past_header);
+        assert_eq!(parse_retry_after(&headers, now), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_after_rejects_malformed_headers() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("not-a-delay"),
+        );
+        assert_eq!(parse_retry_after(&headers, UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn provider_retry_delay_uses_the_longer_value_without_adding_delays() {
+        let provider_delay = Error::ProviderRateLimited {
+            kind: RateLimitKind::General,
+            retry_after: Duration::from_secs(20),
+        };
+        assert_eq!(
+            retry_delay(&provider_delay, Duration::from_secs(5)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            retry_delay(&provider_delay, Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+}

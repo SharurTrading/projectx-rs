@@ -8,6 +8,10 @@
 //! state. Applications authenticate explicitly and translate these types at
 //! their own boundary.
 //!
+//! Authenticated REST requests use shared rolling-window admission control.
+//! Safe queries wait asynchronously for capacity, while mutations return
+//! [`Error::LocallyRateLimited`] before sending when the local budget is full.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -29,6 +33,7 @@ mod credentials;
 mod error;
 mod ids;
 mod models;
+mod rate_limit;
 mod realtime;
 mod token;
 
@@ -43,6 +48,7 @@ pub use models::{
     OrderResponse, OrderSearch, OrderType, PartialCloseContract, PlaceOrder, Position,
     PositionType, SearchContracts, Side, Trade, TradeSearch,
 };
+pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
 pub use realtime::{
     Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, SignalRInvocation,
 };

@@ -23,4 +23,8 @@ impl TokenStore {
             .as_ref()
             .map(|token| token.expose_secret().to_owned())
     }
+
+    pub(crate) async fn is_authenticated(&self) -> bool {
+        self.token.read().await.is_some()
+    }
 }

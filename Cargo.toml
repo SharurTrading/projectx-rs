@@ -19,6 +19,8 @@ default = []
 live-tests = []
 
 [dependencies]
+futures-util = "0.3"
+httpdate = "1"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rust_decimal = { version = "1.37", features = ["serde-arbitrary-precision"] }
@@ -32,11 +34,10 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 url = "2"
-futures-util = "0.3"
 
 [dev-dependencies]
 httpmock = "0.8"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "test-util"] }
 
 [lints.rust]
 missing_docs = "deny"
