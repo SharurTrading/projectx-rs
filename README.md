@@ -11,6 +11,10 @@ This project is available under the [MIT License](LICENSE). It is an independent
 and is not affiliated with, endorsed by, or sponsored by ProjectX Trading LLC. Users are responsible
 for complying with the provider's terms and maintaining an active API subscription where required.
 
+Use the official [ProjectX Gateway API documentation](https://gateway.docs.projectx.com/) as the
+reference for provider endpoints, request fields, response payloads, and subscription requirements.
+This README documents the additional safety and lifecycle behavior supplied by this client.
+
 ## Design boundaries
 
 - No trading-platform or application dependencies.
@@ -46,7 +50,7 @@ for account in accounts {
 Applications should source secrets outside this library and must not log credentials or bearer
 tokens. See [SECURITY.md](SECURITY.md).
 
-## Status
+## Feature coverage
 
 The client covers the complete documented Gateway REST surface:
 
@@ -60,6 +64,70 @@ The client covers the complete documented Gateway REST surface:
 
 It also implements both documented SignalR hubs, market/user subscription helpers,
 bounded event delivery, reconnect notification, and exact provider payload models.
+
+### Session validation and token rotation
+
+`authenticate()` performs API-key login and stores the bearer token privately. Applications that
+run for more than a short request cycle can instead use `authenticate_with_validation(period)`:
+
+```rust,no_run
+use std::time::Duration;
+
+use projectx_client::{Client, Credentials};
+
+# async fn run() -> Result<(), projectx_client::Error> {
+let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
+let validator = client
+    .authenticate_with_validation(Duration::from_secs(15 * 60))
+    .await?;
+
+// REST requests and real-time hubs created from `client` share the rotating token.
+
+validator.shutdown().await;
+# Ok(())
+# }
+```
+
+The validator periodically calls the provider's validation endpoint and atomically replaces the
+stored token when the provider returns a new one. A real-time connection snapshots the latest token
+immediately before every initial connection and reconnect, so a reconnect does not reuse the token
+from the original WebSocket session. Dropping `SessionValidator` cancels validation; call
+`shutdown().await` when waiting for the background task to finish matters.
+
+### Automatic reconnect and subscription replay
+
+After `connect()` completes the SignalR handshake, a watchdog monitors connection and activity
+state. A dropped or stale connection is replaced automatically with a freshly authenticated
+handshake. Reconnect attempts are serialized, so concurrent failure signals cannot create competing
+sessions.
+
+The transport deliberately does not own subscription truth. When a replacement handshake succeeds,
+it emits `RealtimeEvent::Reconnected`; the application must then replay its canonical subscription
+set. Keep that set outside `RealtimeClient` and make replay idempotent. Calling `disconnect()` is an
+explicit shutdown: it stops the watchdog, performs a bounded close handshake, and does not trigger
+automatic reconnect.
+
+### Transport gaps and `acknowledge_transport_gap`
+
+Real-time delivery is bounded. If the consumer falls behind far enough that a provider frame cannot
+enter the event queue, continuing with a partial stream would make an order book, position mirror,
+or other projection silently incorrect. The client therefore disconnects, pauses automatic
+reconnect, drains events that were already accepted, and then emits one ordered
+`RealtimeEvent::TransportGap` marker.
+
+`RealtimeEventReceiver::acknowledge_transport_gap()` is a recovery gate, not a data repair method.
+Use this sequence:
+
+1. Receive `TransportGap` and mark every affected downstream projection stale or unavailable.
+2. Install the application's recovery fence and arrange a fresh snapshot or reconciliation.
+3. Call `acknowledge_transport_gap()` only after that fence is in place. Calling it before the gap
+   marker has been delivered has no effect.
+4. The watchdog may now reconnect. On `Reconnected`, replay the canonical subscriptions.
+5. Apply snapshot-before-delta recovery and clear the stale state only when reconciliation is
+   complete.
+
+This explicit acknowledgement prevents an overflow/reconnect loop from presenting a new live stream
+as though no data were lost.
 
 ## Real-time example
 
@@ -87,7 +155,8 @@ while let Some(event) = events.recv().await {
             realtime.subscribe_contract_trades(&contract).await?;
         }
         RealtimeEvent::TransportGap => {
-            // Fence and recover downstream state before acknowledging.
+            // Mark downstream state stale and start snapshot/reconciliation.
+            // Only after that recovery fence is installed may reconnect resume.
             events.acknowledge_transport_gap();
         }
         _ => {}
@@ -96,6 +165,50 @@ while let Some(event) = events.recv().await {
 # Ok(())
 # }
 ```
+
+`take_event_receiver()` can be claimed once because events have a single ordered consumer. The
+receiver should be drained continuously; do not perform slow reconciliation inline in the receive
+loop.
+
+## Real-time capabilities
+
+Typed helpers reject use with the wrong hub before sending anything:
+
+| Hub | Subscription helpers |
+| --- | --- |
+| `Hub::Market` | contract trades, quotes, and market depth |
+| `Hub::User` | accounts plus per-account orders, positions, and trades |
+
+Every helper has a matching unsubscribe operation. `invoke()` remains available for a provider
+target that does not yet have a typed helper. Invocations are correlated with SignalR completion
+frames and return only after provider acceptance, provider rejection, timeout, or session failure.
+Inbound invocation messages expose their target and payload and can decode the provider entity into
+a caller-selected Serde type.
+
+## Bounds, retries, and failure behavior
+
+The client makes overload and ambiguous execution visible instead of hiding it:
+
+| Boundary | Behavior |
+| --- | --- |
+| HTTP response body | Streamed under a configurable byte limit; oversized bodies are rejected. |
+| Safe REST queries | Transient failures use configurable bounded exponential backoff. |
+| Order and position mutations | Never retried automatically because a timeout can have an ambiguous outcome. |
+| SignalR outbound queue | Bounded; a full queue returns `SendQueueFull` rather than growing without limit. |
+| Pending SignalR invocations | Bounded and completion-correlated; timeout or disconnect fails the caller. |
+| SignalR event queue | Bounded; overflow produces the fenced `TransportGap` lifecycle described above. |
+| Handshake and shutdown | Readiness requires a valid SignalR handshake; close and completion waits are bounded. |
+
+The current built-in real-time limits are 1,024 outbound messages, 1,024 pending invocations, and
+10,000 received events. Handshake, invocation-completion, and close waits are bounded at 10, 15, and
+5 seconds respectively. The watchdog checks every 5 seconds and treats 30 seconds without transport
+activity as stale. These are client implementation limits, not provider guarantees.
+
+`ClientBuilder` also supports custom provider endpoints, HTTP timeouts, response-size limits, proxy
+configuration, retry counts, and retry delays. Unknown provider enum codes remain observable through
+`Unknown(code)` variants rather than being silently discarded. Prices, quantities, balances, and
+P&L remain `rust_decimal::Decimal` throughout provider decoding. The SignalR codec handles record
+separator framing, messages coalesced with the handshake response, and provider ping/pong traffic.
 
 ## Deliberate live validation
 
