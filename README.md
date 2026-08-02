@@ -321,8 +321,11 @@ ambient `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` variables; use `ClientBuild
 proxy is intended. Unknown provider response-enum codes remain
 observable through `Unknown(code)` variants rather than being silently discarded. Prices, balances,
 fees, and P&L use `rust_decimal::Decimal` throughout provider decoding; provider-native contract
-counts and volumes remain integral. The SignalR codec handles record-separator framing, messages
-coalesced with the handshake response, and provider ping/pong traffic.
+counts and volumes remain integral. Exact REST and SignalR decimal tokens cross a raw JSON-number
+boundary without enabling dependency-wide arbitrary-precision Serde behavior; type-1 frames are
+emitted as `RealtimeEvent::Invocation` for exact typed decoding. The SignalR codec handles
+record-separator framing, messages coalesced with the handshake response, and provider ping/pong
+traffic.
 
 Custom remote endpoints must use HTTPS (and therefore WSS for real-time hubs) so API keys and bearer
 tokens are never sent in plaintext. Plain HTTP/WS is accepted only for exact loopback hosts used by

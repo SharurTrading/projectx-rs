@@ -39,10 +39,10 @@ jiff = { version = "0.2.35", default-features = false, features = ["serde", "std
 parking_lot = "0.12.5"
 rand = "0.10.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
-rust_decimal = { version = "1.42.1", features = ["serde-arbitrary-precision"] }
+rust_decimal = "1.42.1"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 serde_repr = "0.1.21"
 sha1 = { version = "0.11.0", default-features = false }
 thiserror = "2.0.19"

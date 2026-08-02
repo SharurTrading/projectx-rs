@@ -1527,7 +1527,6 @@ dependencies = [
  "serde",
  "serde_json",
  "wasm-bindgen",
- "zmij",
 ]
 
 [[package]]

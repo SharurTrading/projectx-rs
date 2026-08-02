@@ -299,7 +299,7 @@ async fn real_time_connect_fails_closed_before_authentication() {
 
 #[test]
 fn invocation_decodes_exact_decimal_payload() {
-    let value: Value = serde_json::from_str(
+    let invocation = SignalRInvocation::from_json(
         r#"{
             "type": 1,
             "target": "GatewayTrade",
@@ -315,10 +315,9 @@ fn invocation_decodes_exact_decimal_payload() {
             ]
         }"#,
     )
-    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"));
-    let invocation = SignalRInvocation::from_value(value)
-        .and_then(|value| value.ok_or(RealtimeError::Protocol("missing invocation")))
-        .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
     let trade: projectx_client::MarketTrade = invocation
         .decode()
         .unwrap_or_else(|error| panic!("fixture market trade must decode: {error}"));
