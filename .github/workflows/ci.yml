@@ -45,6 +45,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
+          fallback: none
           tool: cargo-nextest@0.9.140
 
       - name: cargo fmt --all -- --check
@@ -105,11 +106,13 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
+          fallback: none
           tool: cargo-deny@0.20.2
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
+          fallback: none
           tool: cargo-audit@0.22.2
 
       - name: cargo deny --locked check
