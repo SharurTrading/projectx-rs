@@ -10,10 +10,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use crate::Error;
 
 macro_rules! numeric_id {
-    ($name:ident, $kind:literal) => {
+    ($name:ident, $kind:literal, $repr:ty) => {
         #[doc = concat!("Validated ProjectX ", $kind, ".")]
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-        pub struct $name(i64);
+        #[repr(transparent)]
+        pub struct $name($repr);
 
         impl $name {
             #[doc = concat!("Creates a ProjectX ", $kind, ".")]
@@ -21,7 +22,7 @@ macro_rules! numeric_id {
             /// # Errors
             ///
             /// Returns an error unless the provider identifier is positive.
-            pub fn new(value: i64) -> Result<Self, Error> {
+            pub fn new(value: $repr) -> Result<Self, Error> {
                 if value <= 0 {
                     return Err(Error::InvalidIdentifier {
                         kind: $kind,
@@ -32,15 +33,16 @@ macro_rules! numeric_id {
             }
 
             #[doc = concat!("Returns the raw ProjectX ", $kind, ".")]
-            pub const fn get(self) -> i64 {
+            #[must_use]
+            pub const fn get(self) -> $repr {
                 self.0
             }
         }
 
-        impl TryFrom<i64> for $name {
+        impl TryFrom<$repr> for $name {
             type Error = Error;
 
-            fn try_from(value: i64) -> Result<Self, Self::Error> {
+            fn try_from(value: $repr) -> Result<Self, Self::Error> {
                 Self::new(value)
             }
         }
@@ -56,7 +58,7 @@ macro_rules! numeric_id {
             where
                 S: Serializer,
             {
-                serializer.serialize_i64(self.0)
+                self.0.serialize(serializer)
             }
         }
 
@@ -65,7 +67,7 @@ macro_rules! numeric_id {
             where
                 D: Deserializer<'de>,
             {
-                let raw = i64::deserialize(deserializer)?;
+                let raw = <$repr>::deserialize(deserializer)?;
                 Self::new(raw).map_err(D::Error::custom)
             }
         }
@@ -76,6 +78,7 @@ macro_rules! string_id {
     ($name:ident, $kind:literal) => {
         #[doc = concat!("Validated ProjectX ", $kind, ".")]
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[repr(transparent)]
         pub struct $name(String);
 
         impl $name {
@@ -83,21 +86,33 @@ macro_rules! string_id {
             ///
             /// # Errors
             ///
-            /// Returns an error for an empty or whitespace-padded identifier.
+            /// Returns an error for an empty identifier or one containing
+            /// whitespace or control characters.
             pub fn new(value: impl Into<String>) -> Result<Self, Error> {
                 let value = value.into();
-                if value.is_empty() || value.trim() != value {
+                if value.is_empty()
+                    || value
+                        .chars()
+                        .any(|character| character.is_whitespace() || character.is_control())
+                {
                     return Err(Error::InvalidIdentifier {
                         kind: $kind,
-                        reason: "value must be non-empty and unpadded",
+                        reason: "value must be non-empty and contain no whitespace or control characters",
                     });
                 }
                 Ok(Self(value))
             }
 
             #[doc = concat!("Borrows the raw ProjectX ", $kind, ".")]
+            #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
             }
         }
 
@@ -105,6 +120,14 @@ macro_rules! string_id {
             type Err = Error;
 
             fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = Error;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
                 Self::new(value)
             }
         }
@@ -136,9 +159,9 @@ macro_rules! string_id {
     };
 }
 
-numeric_id!(AccountId, "account identifier");
-numeric_id!(OrderId, "order identifier");
-numeric_id!(PositionId, "position identifier");
-numeric_id!(TradeId, "trade identifier");
+numeric_id!(AccountId, "account identifier", i32);
+numeric_id!(OrderId, "order identifier", i64);
+numeric_id!(PositionId, "position identifier", i32);
+numeric_id!(TradeId, "trade identifier", i64);
 string_id!(ContractId, "contract identifier");
 string_id!(SymbolId, "symbol identifier");

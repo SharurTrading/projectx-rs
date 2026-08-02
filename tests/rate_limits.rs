@@ -8,7 +8,7 @@ use std::time::Duration;
 use httpmock::prelude::*;
 use projectx_client::{
     AccountId, BarUnit, Client, ContractId, Credentials, Endpoints, Error, HistoryRequest,
-    OrderType, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side,
+    OrderType, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side, Timestamp,
 };
 use serde_json::json;
 
@@ -37,7 +37,7 @@ async fn authenticate(client: &Client, server: &MockServer) {
         .mock_async(|when, then| {
             when.method(POST).path("/api/Auth/loginKey");
             then.status(200)
-                .json_body(json!({"success": true, "token": "synthetic-token"}));
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
         })
         .await;
     client
@@ -48,21 +48,14 @@ async fn authenticate(client: &Client, server: &MockServer) {
 }
 
 fn place_order() -> PlaceOrder {
-    PlaceOrder {
-        account_id: AccountId::new(42)
-            .unwrap_or_else(|error| panic!("fixture account must be valid: {error}")),
-        contract_id: ContractId::new("CON.F.US.MNQ.M26")
-            .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}")),
-        order_type: OrderType::Market,
-        side: Side::Bid,
-        size: 1,
-        limit_price: None,
-        stop_price: None,
-        trail_price: None,
-        custom_tag: Some("rate-limit-fixture".to_owned()),
-        stop_loss_bracket: None,
-        take_profit_bracket: None,
-    }
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    PlaceOrder::builder(account_id, contract_id, OrderType::Market, Side::Bid, 1)
+        .custom_tag("rate-limit-fixture")
+        .build()
+        .unwrap_or_else(|error| panic!("fixture order must be valid: {error}"))
 }
 
 #[tokio::test]
@@ -72,14 +65,14 @@ async fn cloned_clients_share_capacity_and_local_mutation_rejection_sends_nothin
         .mock_async(|when, then| {
             when.method(POST).path("/api/Account/search");
             then.status(200)
-                .json_body(json!({"accounts": [], "success": true}));
+                .json_body(json!({"accounts": [], "success": true, "errorCode": 0}));
         })
         .await;
     let placement = server
         .mock_async(|when, then| {
             when.method(POST).path("/api/Order/place");
             then.status(200)
-                .json_body(json!({"orderId": 84, "success": true}));
+                .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
         })
         .await;
     let window = Duration::from_mins(1);
@@ -90,11 +83,9 @@ async fn cloned_clients_share_capacity_and_local_mutation_rejection_sends_nothin
         .search_active_accounts()
         .await
         .unwrap_or_else(|error| panic!("first general request must succeed: {error}"));
-    let error = client
-        .clone()
-        .place_order(&place_order())
-        .await
-        .expect_err("the shared general budget must reject the mutation locally");
+    let Err(error) = client.clone().place_order(&place_order()).await else {
+        panic!("the shared general budget must reject the mutation locally");
+    };
 
     assert!(matches!(
         error,
@@ -114,14 +105,14 @@ async fn retrieve_bars_uses_a_budget_independent_from_general_queries() {
         .mock_async(|when, then| {
             when.method(POST).path("/api/Account/search");
             then.status(200)
-                .json_body(json!({"accounts": [], "success": true}));
+                .json_body(json!({"accounts": [], "success": true, "errorCode": 0}));
         })
         .await;
     let history = server
         .mock_async(|when, then| {
             when.method(POST).path("/api/History/retrieveBars");
             then.status(200)
-                .json_body(json!({"bars": [], "success": true}));
+                .json_body(json!({"bars": [], "success": true, "errorCode": 0}));
         })
         .await;
     let client = fixture_client(&server, limits(1, Duration::from_mins(1)), 0);
@@ -131,18 +122,22 @@ async fn retrieve_bars_uses_a_budget_independent_from_general_queries() {
         .search_active_accounts()
         .await
         .unwrap_or_else(|error| panic!("general query must succeed: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    let history_request = HistoryRequest::builder(
+        contract_id,
+        false,
+        Timestamp::new("2026-01-01T00:00:00Z")
+            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
+        Timestamp::new("2026-01-01T01:00:00Z")
+            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
+        BarUnit::Minute,
+    )
+    .limit(60)
+    .build()
+    .unwrap_or_else(|error| panic!("fixture history request must be valid: {error}"));
     client
-        .retrieve_bars(&HistoryRequest {
-            contract_id: ContractId::new("CON.F.US.MNQ.M26")
-                .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}")),
-            live: false,
-            start_time: "2026-01-01T00:00:00Z".to_owned(),
-            end_time: "2026-01-01T01:00:00Z".to_owned(),
-            unit: BarUnit::Minute,
-            unit_number: 1,
-            limit: 60,
-            include_partial_bar: false,
-        })
+        .retrieve_bars(&history_request)
         .await
         .unwrap_or_else(|error| panic!("history query must use its own budget: {error}"));
 
@@ -163,16 +158,15 @@ async fn provider_retry_after_cools_the_shared_budget() {
         .mock_async(|when, then| {
             when.method(POST).path("/api/Order/place");
             then.status(200)
-                .json_body(json!({"orderId": 84, "success": true}));
+                .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
         })
         .await;
     let client = fixture_client(&server, limits(10, Duration::from_mins(1)), 0);
     authenticate(&client, &server).await;
 
-    let query_error = client
-        .search_active_accounts()
-        .await
-        .expect_err("provider HTTP 429 must remain observable after retries are exhausted");
+    let Err(query_error) = client.search_active_accounts().await else {
+        panic!("provider HTTP 429 must remain observable after retries are exhausted");
+    };
     assert!(matches!(
         query_error,
         Error::ProviderRateLimited {
@@ -181,10 +175,9 @@ async fn provider_retry_after_cools_the_shared_budget() {
         } if retry_after == Duration::from_mins(1)
     ));
 
-    let mutation_error = client
-        .place_order(&place_order())
-        .await
-        .expect_err("the shared provider cooldown must reject a mutation before sending");
+    let Err(mutation_error) = client.place_order(&place_order()).await else {
+        panic!("the shared provider cooldown must reject a mutation before sending");
+    };
     assert!(matches!(
         mutation_error,
         Error::LocallyRateLimited {
@@ -208,10 +201,9 @@ async fn provider_rate_limit_after_mutation_send_is_ambiguous_and_never_retried(
     let client = fixture_client(&server, limits(10, Duration::from_mins(1)), 3);
     authenticate(&client, &server).await;
 
-    let error = client
-        .place_order(&place_order())
-        .await
-        .expect_err("a provider response after mutation submission must be reconciled");
+    let Err(error) = client.place_order(&place_order()).await else {
+        panic!("a provider response after mutation submission must be reconciled");
+    };
 
     assert!(matches!(
         error,
@@ -229,20 +221,21 @@ async fn session_validator_shutdown_cancels_a_rate_limit_wait() {
         .mock_async(|when, then| {
             when.method(POST).path("/api/Auth/loginKey");
             then.status(200)
-                .json_body(json!({"success": true, "token": "synthetic-token"}));
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
         })
         .await;
     let accounts = server
         .mock_async(|when, then| {
             when.method(POST).path("/api/Account/search");
             then.status(200)
-                .json_body(json!({"accounts": [], "success": true}));
+                .json_body(json!({"accounts": [], "success": true, "errorCode": 0}));
         })
         .await;
     let validation = server
         .mock_async(|when, then| {
-            when.method(POST).path("/api/Auth/validate");
-            then.status(200).json_body(json!({"success": true}));
+            when.method(POST).path("/api/Auth/validate").body("");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
         })
         .await;
     let client = fixture_client(&server, limits(1, Duration::from_mins(1)), 0);
@@ -258,7 +251,8 @@ async fn session_validator_shutdown_cancels_a_rate_limit_wait() {
     tokio::time::sleep(Duration::from_millis(1_050)).await;
     tokio::time::timeout(Duration::from_millis(100), validator.shutdown())
         .await
-        .unwrap_or_else(|_| panic!("validator shutdown must cancel the limiter wait"));
+        .unwrap_or_else(|_| panic!("validator shutdown must cancel the limiter wait"))
+        .unwrap_or_else(|error| panic!("validator task must shut down cleanly: {error}"));
     login.assert_calls_async(1).await;
     accounts.assert_calls_async(1).await;
     validation.assert_calls_async(0).await;

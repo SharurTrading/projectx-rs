@@ -19,25 +19,31 @@ default = []
 live-tests = []
 
 [dependencies]
-futures-util = "0.3"
-httpdate = "1"
-parking_lot = "0.12"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
-rust_decimal = { version = "1.37", features = ["serde-arbitrary-precision"] }
-secrecy = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
-serde_repr = "0.1"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-tracing = "0.1"
-url = "2"
+data-encoding = { version = "2.11.0", default-features = false, features = ["alloc"] }
+futures-util = "0.3.33"
+httpdate = "1.0.3"
+jiff = { version = "0.2.35", default-features = false, features = ["serde", "std"] }
+parking_lot = "0.12.5"
+rand = "0.10.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+rust_decimal = { version = "1.42.1", features = ["serde-arbitrary-precision"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
+serde_repr = "0.1.21"
+sha1 = { version = "0.11.0", default-features = false }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tracing = "0.1.44"
+url = "2.5.8"
 
 [dev-dependencies]
-httpmock = "0.8"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "test-util"] }
+httpmock = "0.8.3"
+log = "0.4.33"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "test-util"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 
 [lints.rust]
 missing_docs = "deny"
@@ -45,4 +51,9 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
+# Public names such as `RealtimeClient` remain clearer than context-dependent
+# abbreviations when imported from the crate root.
 module_name_repetitions = "allow"
+await_holding_lock = "deny"
+expect_used = "deny"
+unwrap_used = "deny"

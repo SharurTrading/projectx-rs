@@ -14,6 +14,7 @@ const DEFAULT_HISTORY_REQUESTS: usize = 50;
 const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
 const DEFAULT_GENERAL_REQUESTS: usize = 200;
 const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_mins(1);
+const MAX_INITIAL_CAPACITY: usize = 1_024;
 
 /// Identifies one provider REST rate-limit budget.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -196,7 +197,9 @@ impl WindowLimiter {
     fn new(limit: RateLimit) -> Self {
         Self {
             limit,
-            state: Mutex::new(WindowState::default()),
+            state: Mutex::new(WindowState::with_capacity(
+                limit.max_requests.min(MAX_INITIAL_CAPACITY),
+            )),
         }
     }
 
@@ -226,13 +229,19 @@ impl WindowLimiter {
     }
 }
 
-#[derive(Default)]
 struct WindowState {
     admitted: VecDeque<Instant>,
     cooldown_until: Option<Instant>,
 }
 
 impl WindowState {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            admitted: VecDeque::with_capacity(capacity),
+            cooldown_until: None,
+        }
+    }
+
     fn expire(&mut self, now: Instant, window: Duration) {
         while self
             .admitted

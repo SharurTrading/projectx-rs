@@ -21,17 +21,41 @@ domain translation.
 - **PX-DECIMAL-01:** Prices, money, balances, fees, and P&L use `rust_decimal::Decimal` in the public
   API. Never expose floating-point values for financial fields.
 - **PX-SECRET-01:** Credentials and bearer tokens are never logged, included in errors, persisted,
-  or exposed through public token accessors. Debug output is redacted.
+  or exposed through public token accessors. Debug output is redacted. Remote endpoints require
+  authenticated encryption; plain HTTP/WebSocket transport is permitted only for exact loopback
+  hosts used by deterministic fixtures. The token-bearing WebSocket HTTP upgrade must not pass
+  through a dependency path that logs the request URI or raw headers. Ambient process proxy
+  variables are ignored; proxying is an explicit client-builder decision.
 - **PX-AUTH-01:** Login sends only `userName` and `apiKey` to `/api/Auth/loginKey`. The HTTP session
   is the sole token writer. Token reads take owned snapshots and never hold a lock across network I/O.
+  Token snapshots carry a revision: reauthentication invalidates outstanding validation responses,
+  and a rotated token is committed only when the revision it validated is still current. Credential
+  replacement is fail-closed: readers cannot use the superseded session while an update is pending,
+  successful reauthentication wins the race, and a failed or cancelled authentication restores only
+  the first accepted deferred validation result. A validation attempt is guarded from immediately
+  before network submission through response decoding: cancellation or any ambiguous post-admission
+  outcome invalidates only its exact revision, and only a definitive pre-send failure or HTTP 429 may
+  retain that basis. Dropping or shutting down the periodic validator synchronously closes request
+  admission and invalidates any already-admitted revision before task cancellation returns control.
+- **PX-RESPONSE-01:** Every REST response contract requires both `success` and `errorCode`, and
+  acceptance requires exactly `success == true` and `errorCode == 0`. Missing or contradictory status
+  fields are semantic failures; for mutations and session validation they are ambiguous fail-closed
+  outcomes.
 - **PX-ACCOUNT-01:** Active-account discovery sends exactly `onlyActiveAccounts: true` to
   `/api/Account/search`.
 - **PX-RUNTIME-01:** The caller owns the async runtime. The library must not create a hidden Tokio
   runtime or block an async executor.
 - **PX-TRANSPORT-01:** Responses are size-bounded. Real-time queues are bounded with explicit
-  overflow behavior. A websocket is not ready until the SignalR handshake is validated.
+  overflow behavior. A websocket is not ready until the SignalR handshake is validated. Real-time
+  lifecycle transitions are generation-fenced and single-writer; cancelling an invocation reclaims
+  its pending slot, either socket half failing tears down the whole session, and dropping the last
+  caller-owned handle cancels every library-owned task.
 - **PX-ORDER-01:** Order placement is not automatically retried because a timeout after submission
   is an ambiguous money-moving outcome. Retry policies must distinguish safe queries from mutations.
+  Documented pending/unknown outcomes and unrecognized future mutation codes are ambiguous; only an
+  endpoint-specific whitelist of documented definitive rejections may become `ProviderError`.
+  Dependency-level HTTP retries stay disabled so the client-owned query loop is the only retry
+  authority and every outbound attempt receives rate-limit admission.
 - **PX-RATE-01:** Authenticated REST attempts share strict rolling-window budgets across client
   clones: history is 50 requests per 30 seconds and all other endpoints are 200 per 60 seconds.
   Queries may wait asynchronously; mutations fail locally before sending when capacity is exhausted.
@@ -44,10 +68,14 @@ domain translation.
 - Public APIs are documented and use typed `thiserror` errors.
 - Provider IDs are validated newtypes with private fields and conversions.
 - Public enums that may grow are `#[non_exhaustive]`.
+- Response-only public structs are `#[non_exhaustive]`; configurable request structs use validated
+  constructors or builders rather than permitting invalid intermediate states.
 - Configuration uses a builder when optional settings exceed two fields.
 - Functions borrow inputs unless they must retain or transfer ownership.
 - Never use `unwrap`, `expect`, `panic!`, or `unsafe` in production paths.
 - Do not hold a synchronization guard across `.await`.
+- Every spawned task has explicit cancellation and tracked teardown; dropping a `JoinHandle` is not
+  treated as cancellation.
 - Organize source by capability; keep `lib.rs` to documentation and selective re-exports.
 - Tests in `tests/` exercise the public API. Unit tests cover private parsing and invariants.
 

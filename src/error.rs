@@ -11,10 +11,11 @@ use crate::RateLimitKind;
 
 /// A provider-declared failed operation.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-#[error("ProjectX rejected the operation (code: {code:?})")]
+#[non_exhaustive]
+#[error("ProjectX rejected the operation (code: {code})")]
 pub struct ProviderError {
-    /// Optional provider error code.
-    pub code: Option<i32>,
+    /// Provider error code.
+    pub code: i32,
 }
 
 /// Errors returned by the `ProjectX` client.
@@ -32,12 +33,39 @@ pub enum Error {
         /// Public-safe reason for rejection.
         reason: &'static str,
     },
-    /// Authentication failed without exposing secret material.
-    #[error("authentication failed: {0}")]
-    Authentication(String),
+    /// The provider rejected the supplied API-key credentials.
+    #[error("provider rejected the credentials (code: {code})")]
+    CredentialsRejected {
+        /// Public provider rejection code.
+        code: i32,
+    },
+    /// The provider rejected validation of the current session.
+    #[error("provider rejected session validation (code: {code})")]
+    SessionValidationRejected {
+        /// Public provider rejection code.
+        code: i32,
+    },
+    /// The provider's success flag and required error code disagreed.
+    #[error("provider returned inconsistent status (success: {success}, code: {code})")]
+    InconsistentResponseStatus {
+        /// Provider success flag.
+        success: bool,
+        /// Provider error code.
+        code: i32,
+    },
+    /// A successful authentication response omitted a usable bearer token.
+    #[error("provider returned success without a usable authentication token")]
+    MissingAuthenticationToken,
+    /// A provider authentication response contained an invalid bearer token.
+    #[error("provider returned an invalid authentication token")]
+    InvalidAuthenticationToken,
     /// No authenticated bearer token is available.
     #[error("the client is not authenticated")]
     NotAuthenticated,
+    /// Session validation may have rotated the provider token, but no
+    /// trustworthy response was received.
+    #[error("session-validation outcome is ambiguous; authenticate again before using the client")]
+    AmbiguousSessionValidation,
     /// The provider rejected an otherwise valid request.
     #[error(transparent)]
     Provider(#[from] ProviderError),
@@ -87,5 +115,11 @@ pub enum Error {
     AmbiguousMutation {
         /// Public-safe operation name.
         operation: &'static str,
+    },
+    /// A library-owned background task terminated unexpectedly.
+    #[error("{task} background task terminated unexpectedly")]
+    BackgroundTaskFailed {
+        /// Public-safe task name.
+        task: &'static str,
     },
 }

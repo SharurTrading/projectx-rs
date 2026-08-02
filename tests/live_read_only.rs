@@ -39,7 +39,6 @@ async fn authenticates_discovers_and_handshakes_market_hub() {
     let realtime = client.realtime(Hub::Market);
     let mut events = realtime
         .take_event_receiver()
-        .await
         .unwrap_or_else(|| panic!("market event receiver must be available"));
     realtime
         .connect()

@@ -6,8 +6,9 @@
 use httpmock::{Mock, prelude::*};
 use projectx_client::{
     AccountId, BarUnit, Bracket, CancelOrder, Client, CloseContract, ContractId, Credentials,
-    Decimal, Endpoints, HistoryRequest, ModifyOrder, OrderId, OrderSearch, OrderType,
-    PartialCloseContract, PlaceOrder, SearchContracts, Side, TradeSearch,
+    Decimal, Endpoints, HistoryRequest, ModifyOrder, OrderId, OrderQuery, OrderSearch, OrderSortBy,
+    OrderSortDirection, OrderStatus, OrderType, PartialCloseContract, PlaceOrder, SearchContracts,
+    Side, Timestamp, TradeSearch,
 };
 use serde_json::json;
 
@@ -33,7 +34,7 @@ async fn authenticated_client(server: &MockServer) -> Client {
                     "apiKey": "synthetic-key"
                 }));
             then.status(200)
-                .json_body(json!({"success": true, "token": "synthetic-token"}));
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
         })
         .await;
     let client = fixture_client(server);
@@ -60,64 +61,10 @@ fn order_id() -> OrderId {
 #[tokio::test]
 async fn contract_and_history_endpoints_match_provider_contracts() {
     let server = MockServer::start_async().await;
-    let available = server
-        .mock_async(|when, then| {
-            when.method(POST)
-                .path("/api/Contract/available")
-                .json_body(json!({"live": false}));
-            then.status(200).json_body(json!({
-                "contracts": [contract_json()],
-                "success": true
-            }));
-        })
-        .await;
-    let search = server
-        .mock_async(|when, then| {
-            when.method(POST)
-                .path("/api/Contract/search")
-                .json_body(json!({"live": false, "searchText": "MNQ"}));
-            then.status(200).json_body(json!({
-                "contracts": [contract_json()],
-                "success": true
-            }));
-        })
-        .await;
-    let by_id = server
-        .mock_async(|when, then| {
-            when.method(POST)
-                .path("/api/Contract/searchById")
-                .json_body(json!({"contractId": "CON.F.US.MNQ.M26"}));
-            then.status(200)
-                .json_body(json!({"contract": contract_json(), "success": true}));
-        })
-        .await;
-    let history = server
-        .mock_async(|when, then| {
-            when.method(POST)
-                .path("/api/History/retrieveBars")
-                .json_body(json!({
-                    "contractId": "CON.F.US.MNQ.M26",
-                    "live": false,
-                    "startTime": "2026-01-01T00:00:00Z",
-                    "endTime": "2026-01-02T00:00:00Z",
-                    "unit": 2,
-                    "unitNumber": 1,
-                    "limit": 100,
-                    "includePartialBar": false
-                }));
-            then.status(200).json_body(json!({
-                "bars": [{
-                    "t": "2026-01-01T00:00:00Z",
-                    "o": 100.10,
-                    "h": 101.20,
-                    "l": 99.90,
-                    "c": 100.25,
-                    "v": 12
-                }],
-                "success": true
-            }));
-        })
-        .await;
+    let available = available_contracts_mock(&server).await;
+    let search = contract_search_mock(&server).await;
+    let by_id = contract_by_id_mock(&server).await;
+    let history = history_mock(&server).await;
 
     let client = authenticated_client(&server).await;
     let contracts = client
@@ -135,17 +82,18 @@ async fn contract_and_history_endpoints_match_provider_contracts() {
         .contract_by_id(&contract_id())
         .await
         .unwrap_or_else(|error| panic!("contract lookup must succeed: {error}"));
+    let history_request = HistoryRequest::builder(
+        contract_id(),
+        false,
+        timestamp("2026-01-01T00:00:00Z"),
+        timestamp("2026-01-02T00:00:00Z"),
+        BarUnit::Minute,
+    )
+    .limit(100)
+    .build()
+    .unwrap_or_else(|error| panic!("fixture history request must be valid: {error}"));
     let bars = client
-        .retrieve_bars(&HistoryRequest {
-            contract_id: contract_id(),
-            live: false,
-            start_time: "2026-01-01T00:00:00Z".to_owned(),
-            end_time: "2026-01-02T00:00:00Z".to_owned(),
-            unit: BarUnit::Minute,
-            unit_number: 1,
-            limit: 100,
-            include_partial_bar: false,
-        })
+        .retrieve_bars(&history_request)
         .await
         .unwrap_or_else(|error| panic!("history must succeed: {error}"));
 
@@ -156,6 +104,11 @@ async fn contract_and_history_endpoints_match_provider_contracts() {
     assert_eq!(contracts, searched);
     assert_eq!(contract, contracts[0]);
     assert_eq!(bars[0].c, Decimal::new(10_025, 2));
+    assert_eq!(
+        bars[0].d.map(|date| date.to_string()).as_deref(),
+        Some("2026-01-01")
+    );
+    assert_eq!(bars[0].k, Some(4_294_967_296));
 }
 
 #[tokio::test]
@@ -186,34 +139,27 @@ async fn order_endpoints_use_typed_exact_requests() {
 
     let client = authenticated_client(&server).await;
     let orders = client
-        .search_orders(&OrderSearch {
-            account_id: account_id(),
-            start_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-            end_timestamp: None,
-        })
+        .search_orders(
+            &OrderSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
+                .unwrap_or_else(|error| panic!("fixture order search must be valid: {error}")),
+        )
         .await
         .unwrap_or_else(|error| panic!("order search must succeed: {error:?}"));
     let open_orders = client
         .search_open_orders(account_id())
         .await
         .unwrap_or_else(|error| panic!("open-order search must succeed: {error}"));
+    let stop_loss = Bracket::new(4, OrderType::Stop)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
+    let place_request =
+        PlaceOrder::builder(account_id(), contract_id(), OrderType::Limit, Side::Bid, 1)
+            .limit_price(Decimal::new(10_025, 2))
+            .custom_tag("synthetic-order")
+            .stop_loss_bracket(stop_loss)
+            .build()
+            .unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
     let placed = client
-        .place_order(&PlaceOrder {
-            account_id: account_id(),
-            contract_id: contract_id(),
-            order_type: OrderType::Limit,
-            side: Side::Bid,
-            size: 1,
-            limit_price: Some(Decimal::new(10_025, 2)),
-            stop_price: None,
-            trail_price: None,
-            custom_tag: Some("synthetic-order".to_owned()),
-            stop_loss_bracket: Some(Bracket {
-                ticks: 4,
-                order_type: OrderType::Stop,
-            }),
-            take_profit_bracket: None,
-        })
+        .place_order(&place_request)
         .await
         .unwrap_or_else(|error| panic!("order placement must succeed: {error}"));
     client
@@ -223,15 +169,13 @@ async fn order_endpoints_use_typed_exact_requests() {
         })
         .await
         .unwrap_or_else(|error| panic!("order cancellation must succeed: {error}"));
+    let modify_request = ModifyOrder::builder(account_id(), order_id())
+        .size(2)
+        .limit_price(Decimal::new(10_025, 2))
+        .build()
+        .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
     client
-        .modify_order(&ModifyOrder {
-            account_id: account_id(),
-            order_id: order_id(),
-            size: Some(2),
-            limit_price: Some(Decimal::new(10_025, 2)),
-            stop_price: None,
-            trail_price: None,
-        })
+        .modify_order(&modify_request)
         .await
         .unwrap_or_else(|error| panic!("order modification must succeed: {error}"));
 
@@ -241,7 +185,53 @@ async fn order_endpoints_use_typed_exact_requests() {
     cancel.assert_async().await;
     modify.assert_async().await;
     assert_eq!(orders, open_orders);
+    assert_eq!(orders[0].status, OrderStatus::Open);
+    assert_eq!(orders[0].trail_distance, Some(8));
+    assert_eq!(orders[0].trail_price, Some(Decimal::new(10_025, 2)));
+    assert_eq!(
+        orders[0].parent_order_id.map(OrderId::get),
+        Some(4_294_967_296)
+    );
+    assert_eq!(
+        orders[0].linked_order_id.map(OrderId::get),
+        Some(4_294_967_297)
+    );
     assert_eq!(placed.order_id, order_id());
+}
+
+#[tokio::test]
+async fn v2_order_query_supports_complete_working_order_reconciliation() {
+    let server = MockServer::start_async().await;
+    let query_mock = order_query_mock(&server).await;
+    let client = authenticated_client(&server).await;
+    let query = OrderQuery::builder(account_id())
+        .statuses([
+            OrderStatus::Open,
+            OrderStatus::Pending,
+            OrderStatus::PendingCancellation,
+            OrderStatus::Suspended,
+        ])
+        .contract_id(contract_id())
+        .created_after(timestamp("2026-01-01T00:00:00Z"))
+        .created_before(timestamp("2026-01-02T00:00:00Z"))
+        .page_size(50)
+        .page_offset(0)
+        .sort_by(OrderSortBy::CreatedAt)
+        .sort_direction(OrderSortDirection::Descending)
+        .include_total_count(true)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture v2 order query must be valid: {error}"));
+
+    let page = client
+        .query_orders(&query)
+        .await
+        .unwrap_or_else(|error| panic!("v2 order query must succeed: {error}"));
+
+    query_mock.assert_async().await;
+    assert_eq!(page.total_count, Some(2));
+    assert_eq!(page.orders.len(), 2);
+    assert_eq!(page.orders[0].status, OrderStatus::Open);
+    assert_eq!(page.orders[1].status, OrderStatus::Suspended);
 }
 
 #[tokio::test]
@@ -274,20 +264,17 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
         })
         .await
         .unwrap_or_else(|error| panic!("position close must succeed: {error}"));
+    let partial_close = PartialCloseContract::new(account_id(), contract_id(), 1)
+        .unwrap_or_else(|error| panic!("fixture partial close must be valid: {error}"));
     client
-        .partial_close_contract(&PartialCloseContract {
-            account_id: account_id(),
-            contract_id: contract_id(),
-            size: 1,
-        })
+        .partial_close_contract(&partial_close)
         .await
         .unwrap_or_else(|error| panic!("partial close must succeed: {error}"));
     let executions = client
-        .search_trades(&TradeSearch {
-            account_id: account_id(),
-            start_timestamp: "2026-01-01T00:00:00Z".to_owned(),
-            end_timestamp: None,
-        })
+        .search_trades(
+            &TradeSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
+                .unwrap_or_else(|error| panic!("fixture trade search must be valid: {error}")),
+        )
         .await
         .unwrap_or_else(|error| panic!("trade search must succeed: {error}"));
 
@@ -296,7 +283,12 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
     partial.assert_async().await;
     trades.assert_async().await;
     assert_eq!(open_positions[0].average_price, Decimal::new(10_000, 2));
+    assert_eq!(
+        open_positions[0].contract_display_name.as_deref(),
+        Some("MNQM26")
+    );
     assert_eq!(executions[0].fees, Decimal::new(140, 2));
+    assert_eq!(executions[0].commissions, Some(Decimal::new(45, 2)));
 }
 
 fn contract_json() -> serde_json::Value {
@@ -311,6 +303,85 @@ fn contract_json() -> serde_json::Value {
     })
 }
 
+fn timestamp(value: &str) -> Timestamp {
+    Timestamp::new(value).unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}"))
+}
+
+async fn available_contracts_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Contract/available")
+                .json_body(json!({"live": false}));
+            then.status(200).json_body(json!({
+                "contracts": [contract_json()],
+                "success": true,
+                "errorCode": 0
+            }));
+        })
+        .await
+}
+
+async fn contract_search_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Contract/search")
+                .json_body(json!({"live": false, "searchText": "MNQ"}));
+            then.status(200).json_body(json!({
+                "contracts": [contract_json()],
+                "success": true,
+                "errorCode": 0
+            }));
+        })
+        .await
+}
+
+async fn contract_by_id_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Contract/searchById")
+                .json_body(json!({"contractId": "CON.F.US.MNQ.M26"}));
+            then.status(200)
+                .json_body(json!({"contract": contract_json(), "success": true, "errorCode": 0}));
+        })
+        .await
+}
+
+async fn history_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/History/retrieveBars")
+                .json_body(json!({
+                    "contractId": "CON.F.US.MNQ.M26",
+                    "live": false,
+                    "startTime": "2026-01-01T00:00:00Z",
+                    "endTime": "2026-01-02T00:00:00Z",
+                    "unit": 2,
+                    "unitNumber": 1,
+                    "limit": 100,
+                    "includePartialBar": false
+                }));
+            then.status(200).json_body(json!({
+                "bars": [{
+                    "t": "2026-01-01T00:00:00Z",
+                    "o": 100.10,
+                    "h": 101.20,
+                    "l": 99.90,
+                    "c": 100.25,
+                    "v": 12,
+                    "d": "2026-01-01",
+                    "k": 4_294_967_296_i64
+                }],
+                "success": true,
+                "errorCode": 0
+            }));
+        })
+        .await
+}
+
 async fn operation_mock<'a>(
     server: &'a MockServer,
     path: &'a str,
@@ -319,7 +390,8 @@ async fn operation_mock<'a>(
     server
         .mock_async(move |when, then| {
             when.method(POST).path(path).json_body(body);
-            then.status(200).json_body(json!({"success": true}));
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
         })
         .await
 }
@@ -334,7 +406,7 @@ async fn order_search_mock(server: &MockServer) -> Mock<'_> {
                     "startTimestamp": "2026-01-01T00:00:00Z"
                 }));
             then.status(200)
-                .json_body(json!({"orders": [order_json()], "success": true}));
+                .json_body(json!({"orders": [order_json()], "success": true, "errorCode": 0}));
         })
         .await
 }
@@ -346,7 +418,36 @@ async fn open_order_mock(server: &MockServer) -> Mock<'_> {
                 .path("/api/Order/searchOpen")
                 .json_body(json!({"accountId": 42}));
             then.status(200)
-                .json_body(json!({"orders": [order_json()], "success": true}));
+                .json_body(json!({"orders": [order_json()], "success": true, "errorCode": 0}));
+        })
+        .await
+}
+
+async fn order_query_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Order/v2/query")
+                .json_body(json!({
+                    "filter": {
+                        "accountId": 42,
+                        "statuses": [1, 6, 7, 8],
+                        "contractId": "CON.F.US.MNQ.M26",
+                        "createdAfter": "2026-01-01T00:00:00Z",
+                        "createdBefore": "2026-01-02T00:00:00Z"
+                    },
+                    "pageSize": 50,
+                    "pageOffset": 0,
+                    "sortBy": 0,
+                    "sortDirection": 1,
+                    "includeTotalCount": true
+                }));
+            then.status(200).json_body(json!({
+                "orders": [order_json(), suspended_order_json()],
+                "totalCount": 2,
+                "success": true,
+                "errorCode": 0
+            }));
         })
         .await
 }
@@ -365,7 +466,7 @@ async fn place_order_mock(server: &MockServer) -> Mock<'_> {
                 "stopLossBracket": {"ticks": 4, "type": 4}
             }));
             then.status(200)
-                .json_body(json!({"orderId": 84, "success": true}));
+                .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
         })
         .await
 }
@@ -386,8 +487,19 @@ fn order_json() -> serde_json::Value {
         "stopPrice": null,
         "fillVolume": 0,
         "filledPrice": null,
-        "customTag": "synthetic-order"
+        "customTag": "synthetic-order",
+        "trailDistance": 8,
+        "trailPrice": 100.25,
+        "parentOrderId": 4_294_967_296_i64,
+        "linkedOrderId": 4_294_967_297_i64
     })
+}
+
+fn suspended_order_json() -> serde_json::Value {
+    let mut order = order_json();
+    order["id"] = json!(85);
+    order["status"] = json!(8);
+    order
 }
 
 async fn position_search_mock(server: &MockServer) -> Mock<'_> {
@@ -401,12 +513,14 @@ async fn position_search_mock(server: &MockServer) -> Mock<'_> {
                     "id": 21,
                     "accountId": 42,
                     "contractId": "CON.F.US.MNQ.M26",
+                    "contractDisplayName": "MNQM26",
                     "creationTimestamp": "2026-01-01T00:00:00Z",
                     "type": 1,
                     "size": 2,
                     "averagePrice": 100.00
                 }],
-                "success": true
+                "success": true,
+                "errorCode": 0
             }));
         })
         .await
@@ -430,12 +544,14 @@ async fn trade_search_mock(server: &MockServer) -> Mock<'_> {
                     "price": 100.25,
                     "profitAndLoss": 5.00,
                     "fees": 1.40,
+                    "commissions": 0.45,
                     "side": 1,
                     "size": 1,
                     "voided": false,
                     "orderId": 84
                 }],
-                "success": true
+                "success": true,
+                "errorCode": 0
             }));
         })
         .await

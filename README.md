@@ -55,18 +55,47 @@ tokens. See [SECURITY.md](SECURITY.md).
 
 ## Feature coverage
 
-The client covers the complete documented Gateway REST surface:
+The current client surface covers the provider workflows needed for authentication, discovery,
+market data, and execution:
 
 - API-key login and rotating-token validation
 - active-account discovery
 - contract availability, text search, and lookup by ID
 - historical bars
-- order search, placement, cancellation, and modification
+- historical and paginated v2 order search, placement, cancellation, and modification
 - open positions, full close, and partial close
 - execution/trade search
 
 It also implements both documented SignalR hubs, market/user subscription helpers,
 bounded event delivery, reconnect notification, and exact provider payload models.
+
+Requests with provider invariants are constructed through validated APIs. In particular,
+`HistoryRequest::builder`, `OrderQuery::builder`, `PlaceOrder::builder`, `ModifyOrder::builder`,
+`Bracket::new`, and `PartialCloseContract::new` reject invalid ranges, counts, status codes, or empty
+mutations before any network request can be admitted.
+
+`OrderType::StopLimit` is retained when decoding provider responses, but the current ProjectX order
+placement and bracket references do not document type code `3` as a supported request value.
+`PlaceOrder::builder` and `Bracket::new` therefore reject it instead of sending an undocumented
+money-moving request.
+
+Money-moving methods never retry automatically. Provider codes documented as pending or unknown,
+as well as future codes this crate does not recognize, return `Error::AmbiguousMutation`; reconcile
+provider state before retrying. Only endpoint-specific codes documented as definitive rejections
+return `Error::Provider`.
+
+### Complete working-order reconciliation
+
+The provider's legacy `search_open_orders` endpoint excludes `Suspended` orders. That omission is
+material for bracket orders because inactive stop-loss and take-profit children are suspended until
+their parent activates them. Do not use `search_open_orders` alone to construct a complete
+working-order mirror.
+
+Use `query_orders` with an `OrderQuery` status filter containing every non-terminal lifecycle state:
+`OrderStatus::Open`, `OrderStatus::Pending`, `OrderStatus::PendingCancellation`, and
+`OrderStatus::Suspended`. Continue through every requested page before declaring reconciliation
+complete; `include_total_count(true)` can request an explicit matching count. Treat the result as a
+provider snapshot to translate at the consuming application's boundary.
 
 ### Session validation and token rotation
 
@@ -86,16 +115,33 @@ let validator = client
 
 // REST requests and real-time hubs created from `client` share the rotating token.
 
-validator.shutdown().await;
+validator.shutdown().await?;
 # Ok(())
 # }
 ```
 
 The validator periodically calls the provider's validation endpoint and atomically replaces the
-stored token when the provider returns a new one. A real-time connection snapshots the latest token
-immediately before every initial connection and reconnect, so a reconnect does not reuse the token
-from the original WebSocket session. Dropping `SessionValidator` cancels validation; call
-`shutdown().await` when waiting for the background task to finish matters.
+stored token when the provider returns a new one. Token updates are revision-fenced: an older login
+or validation request cannot overwrite credentials established by a newer authentication cycle. A
+real-time connection snapshots the latest token immediately before every initial connection and
+reconnect, so a reconnect does not reuse the token from the original WebSocket session. A token
+that receives HTTP 401, a terminal validation code, or an unusable replacement token is immediately
+unavailable to new REST and real-time work. If authentication is concurrently replacing that
+session, reads fail closed until the race resolves, and the new authentication takes precedence.
+
+The periodic validator stops when the current session is definitively lost and no replacement
+authentication is in flight. `SessionValidator::is_finished()` exposes that state; call
+`shutdown().await?` to wait for termination and receive the terminal validation error. If shutdown
+cancels a request that may already have reached the provider, it returns
+`Error::AmbiguousSessionValidation` and invalidates only that request's token revision; authenticate
+again before further work. Dropping the guard cancels without waiting. If a validation request is
+already admitted, drop synchronously makes that exact token revision unavailable before aborting
+the task. Applications that need the terminal result should prefer `shutdown()`.
+
+Direct `validate_session()` calls follow the same rule. Cancellation, a timeout after submission,
+an untrustworthy success/error-code pair, an oversized or malformed response, or an unusable rotated
+token all fail closed because the provider may already have replaced the old bearer. Definitive
+pre-send connection failures and HTTP 429 retain the current revision and remain safely retryable.
 
 ### Automatic reconnect and subscription replay
 
@@ -110,13 +156,31 @@ set. Keep that set outside `RealtimeClient` and make replay idempotent. Calling 
 explicit shutdown: it stops the watchdog, performs a bounded close handshake, and does not trigger
 automatic reconnect.
 
+Connection generations are fenced as well. A late task or reconnect attempt from a superseded
+session cannot publish readiness, complete an invocation, or tear down the replacement session. A
+reader or writer failure closes the whole generation, and dropping the final real-time client handle
+cancels its background work.
+
+An invocation whose completion times out is ambiguous: the provider may have applied a subscription
+change before its acknowledgement was lost. Cancellation after the invocation enters the writer
+queue has the same ambiguity. In either case the client ends that connection generation; after
+`Reconnected`, replay the canonical subscription set instead of guessing which operation applied.
+
+SignalR control traffic remains internal: the client sends a type-6 SignalR ping after 15 seconds
+without an outbound frame, while provider keepalive messages refresh inbound liveness without
+entering the application event queue. A provider close message ends the active generation, and
+automatic reconnect continues only when that message explicitly sets `allowReconnect` to `true`;
+terminal provider closes therefore cannot create a reconnect loop.
+
 ### Transport gaps and `acknowledge_transport_gap`
 
 Real-time delivery is bounded. If the consumer falls behind far enough that a provider frame cannot
 enter the event queue, continuing with a partial stream would make an order book, position mirror,
 or other projection silently incorrect. The client therefore disconnects, pauses automatic
-reconnect, drains events that were already accepted, and then emits one ordered
-`RealtimeEvent::TransportGap` marker.
+reconnect, ends the overflowed connection generation, drains every event that was already accepted,
+delivers that generation's final `Disconnected` event, and only then emits one ordered
+`RealtimeEvent::TransportGap` marker. A generation fence prevents late producer work from entering
+the queue while this ordered tail is delivered.
 
 `RealtimeEventReceiver::acknowledge_transport_gap()` is a recovery gate, not a data repair method.
 Use this sequence:
@@ -144,7 +208,6 @@ client.authenticate().await?;
 let realtime = client.realtime(Hub::Market);
 let mut events = realtime
     .take_event_receiver()
-    .await
     .ok_or("event receiver was already claimed")?;
 realtime.connect().await?;
 
@@ -196,23 +259,50 @@ The client makes overload and ambiguous execution visible instead of hiding it:
 | --- | --- |
 | HTTP response body | Streamed under a configurable byte limit; oversized bodies are rejected. |
 | HTTP redirects | Not followed automatically, keeping one admitted attempt equal to one outbound request. |
+| Dependency HTTP retries | Disabled; only the client-owned query loop retries, with fresh rate-limit admission per attempt. |
 | Safe REST queries | Wait for local rate-limit capacity; transient failures use configurable bounded exponential backoff. |
+| Session validation | Revision-fenced and cancellation-safe; ambiguous post-admission outcomes invalidate that exact session and require authentication. |
 | Order and position mutations | Never retried automatically because a timeout can have an ambiguous outcome. |
 | SignalR outbound queue | Bounded; a full queue returns `SendQueueFull` rather than growing without limit. |
 | Pending SignalR invocations | Bounded and completion-correlated; timeout or disconnect fails the caller. |
 | SignalR event queue | Bounded; overflow produces the fenced `TransportGap` lifecycle described above. |
 | Handshake and shutdown | Readiness requires a valid SignalR handshake; close and completion waits are bounded. |
 
-The current built-in real-time limits are 1,024 outbound messages, 1,024 pending invocations, and
-10,000 received events. Handshake, invocation-completion, and close waits are bounded at 10, 15, and
-5 seconds respectively. The watchdog checks every 5 seconds and treats 30 seconds without transport
-activity as stale. These are client implementation limits, not provider guarantees.
+Cancellation cannot make a submitted mutation safe to repeat. If an application drops a mutation
+future after polling has begun, it must treat the outcome as potentially ambiguous and reconcile
+provider state before retrying, just as it would after `Error::AmbiguousMutation`.
 
-`ClientBuilder` also supports custom provider endpoints, HTTP timeouts, response-size limits, proxy
-configuration, retry counts, and retry delays. Unknown provider enum codes remain observable through
-`Unknown(code)` variants rather than being silently discarded. Prices, quantities, balances, and
-P&L remain `rust_decimal::Decimal` throughout provider decoding. The SignalR codec handles record
-separator framing, messages coalesced with the handshake response, and provider ping/pong traffic.
+The current built-in real-time limits are 256 outbound messages, 256 pending invocations, and 512
+received events. The event queue also has a 32 MiB aggregate decoded-memory charge: each JSON event
+costs 256 bytes plus 16 times its encoded frame length, so the count limit cannot multiply the
+maximum frame size into an unsafe allocation. One fixed-size terminal lifecycle event is reserved
+outside that data budget so a gap always ends with `Disconnected`. An outbound invocation may encode
+to at most 64 KiB. WebSocket messages and individual frames are capped at 1 MiB and 256 KiB, with
+64 KiB read/write buffers and a 256 KiB maximum write buffer. Connection, handshake,
+invocation-completion, and close waits are bounded at 10, 10, 15, and 5 seconds respectively. The
+client sends a SignalR ping after 15 seconds without an outbound frame; the watchdog checks every 5
+seconds and treats 30 seconds without inbound transport activity as stale. These are client
+implementation limits, not provider guarantees.
+
+`ClientBuilder` also supports custom provider endpoints, HTTP timeouts, response-size limits,
+explicit proxy configuration, retry counts, and retry delays. The client deliberately ignores
+ambient `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` variables; use `ClientBuilder::proxy` when a
+proxy is intended. Unknown provider response-enum codes remain
+observable through `Unknown(code)` variants rather than being silently discarded. Prices, balances,
+fees, and P&L use `rust_decimal::Decimal` throughout provider decoding; provider-native contract
+counts and volumes remain integral. The SignalR codec handles record-separator framing, messages
+coalesced with the handshake response, and provider ping/pong traffic.
+
+Custom remote endpoints must use HTTPS (and therefore WSS for real-time hubs) so API keys and bearer
+tokens are never sent in plaintext. Plain HTTP/WS is accepted only for exact loopback hosts used by
+local deterministic fixtures, and the builder rejects combining those plaintext fixture endpoints
+with an explicit proxy. Ignoring ambient proxy variables also prevents a host environment from
+silently redirecting those loopback credentials away from the local machine.
+
+The bearer-bearing WebSocket upgrade runs through a dedicated HTTP/1 client and is fully validated
+before the socket enters tungstenite's framing codec. This keeps the token-bearing URI out of
+tungstenite's dependency logs; real-time transport errors are intentionally opaque for the same
+reason.
 
 ## REST rate limits
 
@@ -240,7 +330,7 @@ retry and returns `Error::AmbiguousMutation`; reconcile provider state before de
 For query responses, HTTP 429 becomes `Error::ProviderRateLimited`. The client accepts both
 delta-seconds and HTTP-date forms of `Retry-After`, applies the longer of that delay and exponential
 backoff, and publishes the cooldown to every clone. Missing or malformed `Retry-After` falls back to
-the configured rolling-window duration.
+the configured rolling-window duration; hostile delays are capped at 24 hours.
 
 Custom gateways can replace the defaults with `ClientBuilder::rate_limits`. Call
 `disable_rate_limits()` only when an external coordinator enforces the limits. The built-in state
@@ -251,7 +341,14 @@ credentials; those deployments still require a shared external limiter.
 
 Normal tests are credential-free. The ignored live probe authenticates, lists
 active accounts and contracts, validates the market SignalR handshake, and
-disconnects without opening the user hub or invoking an order endpoint:
+disconnects without opening the user hub or invoking an order endpoint.
+
+The probe reads `PROJECTX_USERNAME` and `PROJECTX_API_KEY` from its process environment. Inject
+both values only for the test process through a password manager, CI secret store, or equivalent
+ephemeral secret launcher. Do not place them in an `.env` file, shell startup file, command-line
+argument, or shell history, and unset any manually exported values immediately after the probe.
+
+When the credentials have been injected deliberately, run:
 
 ```text
 cargo test --features live-tests --test live_read_only -- --ignored

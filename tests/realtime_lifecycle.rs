@@ -12,7 +12,10 @@ use projectx_client::{
     SignalRInvocation,
 };
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::oneshot};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, oneshot},
+};
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async,
     tungstenite::{Message, handshake::server::Request},
@@ -80,6 +83,30 @@ fn has_token(uri: &str, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
+async fn authenticate_fixture(client: &Client) {
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture login must succeed: {error}"));
+}
+
+async fn wait_for_client_close(socket: &mut WebSocketStream<tokio::net::TcpStream>) -> bool {
+    while let Some(message) = socket.next().await {
+        match message {
+            Ok(Message::Close(_)) => {
+                socket
+                    .flush()
+                    .await
+                    .unwrap_or_else(|error| panic!("close response must flush: {error}"));
+                return true;
+            }
+            Err(_) => return false,
+            Ok(_) => {}
+        }
+    }
+    false
+}
+
 fn spawn_reconnect_server(
     listener: TcpListener,
     close_first_rx: oneshot::Receiver<()>,
@@ -119,11 +146,53 @@ fn spawn_reconnect_server(
                             });
                     }
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Close(_)) => {
+                    second
+                        .flush()
+                        .await
+                        .unwrap_or_else(|error| panic!("close response must flush: {error}"));
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {}
             }
         }
         (first_uri, second_uri)
+    })
+}
+
+fn spawn_uncompleted_invocation_server(
+    listener: TcpListener,
+    seen_tx: oneshot::Sender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let mut seen_tx = Some(seen_tx);
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Text(frame)) => {
+                    let payload: Value = serde_json::from_str(frame.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|error| panic!("invocation fixture must be JSON: {error}"));
+                    if payload.get("type").and_then(Value::as_u64) == Some(1)
+                        && let Some(seen_tx) = seen_tx.take()
+                    {
+                        seen_tx
+                            .send(())
+                            .unwrap_or_else(|()| panic!("invocation signal must send"));
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    socket
+                        .flush()
+                        .await
+                        .unwrap_or_else(|error| panic!("close response must flush: {error}"));
+                    break;
+                }
+                Err(_) => break,
+                Ok(_) => {}
+            }
+        }
     })
 }
 
@@ -135,7 +204,8 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
             when.method(POST).path("/api/Auth/loginKey");
             then.status(200).json_body(json!({
                 "success": true,
-                "token": "initial synthetic token+/="
+                "errorCode": 0,
+                "token": "initial-synthetic-token+/="
             }));
         })
         .await;
@@ -144,7 +214,8 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
             when.method(POST).path("/api/Auth/validate");
             then.status(200).json_body(json!({
                 "success": true,
-                "newToken": "rotated/synthetic token=="
+                "errorCode": 0,
+                "newToken": "rotated/synthetic-token=="
             }));
         })
         .await;
@@ -166,7 +237,6 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
     let realtime = client.realtime(Hub::Market);
     let mut events = realtime
         .take_event_receiver()
-        .await
         .unwrap_or_else(|| panic!("event receiver must be available once"));
     realtime
         .connect()
@@ -206,8 +276,8 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
     let (first_uri, second_uri) = server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
-    assert!(has_token(&first_uri, "initial synthetic token+/="));
-    assert!(has_token(&second_uri, "rotated/synthetic token=="));
+    assert!(has_token(&first_uri, "initial-synthetic-token+/="));
+    assert!(has_token(&second_uri, "rotated/synthetic-token=="));
 }
 
 #[tokio::test]
@@ -246,11 +316,618 @@ fn invocation_decodes_exact_decimal_payload() {
         }"#,
     )
     .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"));
-    let invocation = SignalRInvocation::from_value(&value)
+    let invocation = SignalRInvocation::from_value(value)
         .and_then(|value| value.ok_or(RealtimeError::Protocol("missing invocation")))
         .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
     let trade: projectx_client::MarketTrade = invocation
         .decode()
         .unwrap_or_else(|error| panic!("fixture market trade must decode: {error}"));
     assert_eq!(trade.price.to_string(), "0.1000000000000000000000000001");
+    assert_eq!(trade.trade_type, projectx_client::TradeLogType::Buy);
+}
+
+#[tokio::test]
+async fn concurrent_connect_installs_exactly_one_session() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        wait_for_client_close(&mut socket).await
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let (first, second) = tokio::join!(realtime.connect(), realtime.connect());
+    assert!(
+        matches!(
+            (&first, &second),
+            (Ok(()), Err(RealtimeError::AlreadyConnected))
+        ) || matches!(
+            (&first, &second),
+            (Err(RealtimeError::AlreadyConnected), Ok(()))
+        )
+    );
+    assert!(realtime.is_connected());
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must disconnect: {error}"));
+    assert!(
+        server
+            .await
+            .unwrap_or_else(|error| panic!("fixture server must join: {error}"))
+    );
+}
+
+#[tokio::test]
+async fn disconnect_during_handshake_fences_connected_publication() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (handshake_tx, handshake_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        let Some(Ok(Message::Text(_))) = socket.next().await else {
+            panic!("fixture must receive a handshake");
+        };
+        handshake_tx
+            .send(())
+            .unwrap_or_else(|()| panic!("handshake signal must send"));
+        while socket.next().await.is_some() {}
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    let connecting = realtime.clone();
+    let connect_task = tokio::spawn(async move { connecting.connect().await });
+    handshake_rx
+        .await
+        .unwrap_or_else(|error| panic!("handshake signal must arrive: {error}"));
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("connecting session must cancel cleanly: {error}"));
+    assert!(matches!(
+        connect_task
+            .await
+            .unwrap_or_else(|error| panic!("connect task must join: {error}")),
+        Err(RealtimeError::ConnectionCancelled)
+    ));
+    assert!(!realtime.is_connected());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+}
+
+#[tokio::test]
+async fn close_timeout_always_clears_the_session() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        std::future::pending::<()>().await;
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    tokio::time::pause();
+    assert!(matches!(
+        realtime.disconnect().await,
+        Err(RealtimeError::Close)
+    ));
+    assert!(!realtime.is_connected());
+    assert!(matches!(
+        realtime.invoke("AfterClose", Vec::new()).await,
+        Err(RealtimeError::NotConnected)
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn websocket_upgrade_has_a_bounded_timeout() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener
+            .accept()
+            .await
+            .unwrap_or_else(|error| panic!("fixture socket must accept: {error}"));
+        std::future::pending::<()>().await;
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    tokio::time::pause();
+    assert!(matches!(
+        realtime.connect().await,
+        Err(RealtimeError::ConnectionTimedOut)
+    ));
+    assert!(!realtime.is_connected());
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelled_admitted_invocation_ends_the_generation() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let server = spawn_uncompleted_invocation_server(listener, seen_tx);
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
+    let invoking = realtime.clone();
+    let task = tokio::spawn(async move { invoking.invoke("Cancelled", Vec::new()).await });
+    seen_rx
+        .await
+        .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
+    task.abort();
+    assert!(task.await.is_err());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
+        Ok(Some(RealtimeEvent::Disconnected))
+    ));
+    assert!(!realtime.is_connected());
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("ended generation cleanup must be idempotent: {error}"));
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+}
+
+#[tokio::test]
+async fn invocation_timeout_ends_the_ambiguous_generation() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let server = spawn_uncompleted_invocation_server(listener, seen_tx);
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
+    let invoking = realtime.clone();
+    let task = tokio::spawn(async move { invoking.invoke("NoCompletion", Vec::new()).await });
+    seen_rx
+        .await
+        .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(16)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        task.await
+            .unwrap_or_else(|error| panic!("invocation task must join: {error}")),
+        Err(RealtimeError::InvocationTimedOut { .. })
+    ));
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("timed-out generation cleanup must be idempotent: {error}"));
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    assert!(!realtime.is_connected());
+    tokio::time::resume();
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+}
+
+#[tokio::test]
+async fn dropping_last_client_handle_closes_the_transport() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        while let Some(message) = socket.next().await {
+            if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    drop(realtime);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), server).await,
+        Ok(Ok(()))
+    ));
+}
+
+#[tokio::test]
+async fn reader_failure_clears_the_writer_session() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert!(matches!(
+        events.recv().await,
+        Some(RealtimeEvent::Connected)
+    ));
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
+        Ok(Some(RealtimeEvent::Disconnected))
+    ));
+    assert!(!realtime.is_connected());
+    assert!(matches!(
+        realtime.invoke("AfterReaderFailure", Vec::new()).await,
+        Err(RealtimeError::NotConnected)
+    ));
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("disconnected session cleanup must be idempotent: {error}"));
+}
+
+#[tokio::test]
+async fn signalr_keepalive_is_internal_and_close_ends_the_generation() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        socket
+            .send(Message::Text(
+                format!(
+                    "{}{}{}{}",
+                    json!({"type": 6}),
+                    TERMINATOR,
+                    json!({"type": 7}),
+                    TERMINATOR
+                )
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("control frames must send: {error}"));
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert!(matches!(
+        events.recv().await,
+        Some(RealtimeEvent::Connected)
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
+        Ok(Some(RealtimeEvent::Disconnected))
+    ));
+    assert!(!realtime.is_connected());
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+}
+
+#[tokio::test]
+async fn idle_session_sends_client_signalr_keepalive() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (keepalive_tx, mut keepalive_rx) = mpsc::channel(1);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Text(frame)) => {
+                    let payload: Value = serde_json::from_str(frame.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|error| panic!("control frame must be JSON: {error}"));
+                    if payload.get("type").and_then(Value::as_u64) == Some(6) {
+                        keepalive_tx
+                            .send(())
+                            .await
+                            .unwrap_or_else(|error| panic!("keepalive signal must send: {error}"));
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    socket
+                        .flush()
+                        .await
+                        .unwrap_or_else(|error| panic!("close response must flush: {error}"));
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    tokio::time::pause();
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let mut keepalive_seen = false;
+    for _ in 0..20 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        if keepalive_rx.try_recv().is_ok() {
+            keepalive_seen = true;
+            break;
+        }
+    }
+    assert!(keepalive_seen, "idle client must send a SignalR ping");
+    tokio::time::resume();
+    realtime
+        .disconnect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must disconnect: {error}"));
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+}
+
+#[tokio::test]
+async fn ping_and_pong_traffic_keeps_the_session_live() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (ping_tx, mut ping_rx) = mpsc::channel(1);
+    let (pong_tx, mut pong_rx) = mpsc::channel(1);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        loop {
+            tokio::select! {
+                command = ping_rx.recv() => {
+                    if command.is_none() {
+                        break;
+                    }
+                    socket
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .unwrap_or_else(|error| panic!("ping must send: {error}"));
+                }
+                message = socket.next() => match message {
+                    Some(Ok(Message::Pong(_))) => {
+                        match pong_tx.try_send(()) {
+                            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
+                            Err(mpsc::error::TrySendError::Closed(())) => break,
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        socket
+                            .flush()
+                            .await
+                            .unwrap_or_else(|error| panic!("close response must flush: {error}"));
+                        break;
+                    }
+                    None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    tokio::time::pause();
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        ping_tx
+            .send(())
+            .await
+            .unwrap_or_else(|error| panic!("ping command must send: {error}"));
+        pong_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("pong must arrive"));
+    }
+    assert!(realtime.is_connected());
+    assert!(!server.is_finished());
+    tokio::time::resume();
+    drop(realtime);
+    drop(ping_tx);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), server).await,
+        Ok(Ok(()))
+    ));
 }

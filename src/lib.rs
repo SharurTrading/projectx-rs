@@ -35,6 +35,7 @@ mod ids;
 mod models;
 mod rate_limit;
 mod realtime;
+mod timestamp;
 mod token;
 
 pub use client::{Client, ClientBuilder, SessionValidator};
@@ -44,12 +45,15 @@ pub use error::{Error, ProviderError};
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 pub use models::{
     Account, Bar, BarUnit, Bracket, CancelOrder, CloseContract, Contract, DepthType,
-    HistoryRequest, MarketDepth, MarketQuote, MarketTrade, ModifyOrder, OperationResponse, Order,
-    OrderResponse, OrderSearch, OrderType, PartialCloseContract, PlaceOrder, Position,
-    PositionType, SearchContracts, Side, Trade, TradeSearch,
+    HistoryRequest, HistoryRequestBuilder, MarketDepth, MarketQuote, MarketTrade, ModifyOrder,
+    ModifyOrderBuilder, OperationResponse, Order, OrderPage, OrderQuery, OrderQueryBuilder,
+    OrderResponse, OrderSearch, OrderSortBy, OrderSortDirection, OrderStatus, OrderType,
+    PartialCloseContract, PlaceOrder, PlaceOrderBuilder, Position, PositionType,
+    RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeSearch,
 };
 pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
 pub use realtime::{
     Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, SignalRInvocation,
 };
 pub use rust_decimal::Decimal;
+pub use timestamp::{ProviderDate, ProviderDateError, Timestamp, TimestampError};
