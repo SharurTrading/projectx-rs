@@ -84,12 +84,24 @@ domain translation.
 Report correctness and design findings as `[BLOCKER]`, `[MAJOR]`, or `[MINOR]`, cite the rule ID,
 file, line, risk, and concrete fix. A blocker or major finding requires changes before merge.
 
-## Public-release gate
+## Release gate
 
-Before changing `publish = false`, making the repository public, or changing the MIT license:
+Every crates.io or GitHub release must originate from a reviewed pull request and the exact merged
+commit on `main`. Direct pushes to protected branches, force-pushes, publishing from a dirty or
+unmerged worktree, and moving or replacing a published version tag are prohibited.
+
+Before merging a release pull request:
 
 1. Confirm provider terms permit the intended source distribution and branding.
 2. Complete a secret and proprietary-content scan, including Git history.
 3. Confirm all fixtures are synthetic and all documentation is public-safe.
-4. Run formatting, Clippy, tests, rustdoc, dependency, and license checks.
-5. Review the public API and commit to a compatibility policy.
+4. Review the public API against the compatibility policy and classify the Semantic Versioning
+   impact.
+5. Update the crate version, lockfile, changelog, and release-facing documentation in the same PR.
+6. Run formatting, strict Clippy, tests, rustdoc, package verification, dependency, license, and
+   secret checks; require the release PR and post-merge `main` CI runs to pass.
+
+After the release PR merges and `main` CI passes, publish that exact commit to crates.io, create an
+annotated `v<version>` tag pointing to it, push the tag without force, and create the matching GitHub
+release. Verify the crate can be resolved and compiled from crates.io before considering the release
+complete.
