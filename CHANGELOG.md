@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Kevin Monaghan
+SPDX-License-Identifier: MIT
+-->
+
 # Changelog
 
 All notable changes will be documented here. This project follows Semantic Versioning after its
@@ -5,6 +10,7 @@ first public release.
 
 ## Unreleased
 
+- License the project under the MIT License and add SPDX file headers.
 - Establish the standalone ProjectX REST client boundary.
 - Add exact decimal models, typed identifiers, redacted credentials, and deterministic fixtures.
 - Cover every documented REST endpoint, including contract-by-ID and partial position close.

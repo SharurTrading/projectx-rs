@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Async Rust client for the `ProjectX` Gateway API.
 //!
 //! This crate models `ProjectX`'s provider-native HTTP contract. It deliberately

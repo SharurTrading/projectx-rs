@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Provider-native request and response models.
 
 use rust_decimal::Decimal;

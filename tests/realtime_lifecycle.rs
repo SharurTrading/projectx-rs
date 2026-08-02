@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Public real-time lifecycle tests using synthetic local fixtures.
 
 use std::time::Duration;

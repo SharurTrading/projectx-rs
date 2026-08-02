@@ -1,10 +1,15 @@
+<!--
+SPDX-FileCopyrightText: 2026 Kevin Monaghan
+SPDX-License-Identifier: MIT
+-->
+
 # projectx-rs
 
 An async, provider-native Rust client for the ProjectX Gateway API.
 
-This repository is currently private and under active extraction. The crate is intentionally not
-publishable until its public-release checklist, provider terms review, and API compatibility review
-are complete.
+This project is available under the [MIT License](LICENSE). It is an independent, unofficial client
+and is not affiliated with, endorsed by, or sponsored by ProjectX Trading LLC. Users are responsible
+for complying with the provider's terms and maintaining an active API subscription where required.
 
 ## Design boundaries
 
@@ -43,7 +48,7 @@ tokens. See [SECURITY.md](SECURITY.md).
 
 ## Status
 
-The private client now covers the complete documented Gateway REST surface:
+The client covers the complete documented Gateway REST surface:
 
 - API-key login and rotating-token validation
 - active-account discovery
@@ -101,3 +106,7 @@ disconnects without opening the user hub or invoking an order endpoint:
 ```text
 cargo test --features live-tests --test live_read_only -- --ignored
 ```
+
+## License
+
+Licensed under the [MIT License](LICENSE).

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Kevin Monaghan
+SPDX-License-Identifier: MIT
+-->
+
 # ProjectX Rust Client Guide
 
 This guide is the repository contract for writing and reviewing `projectx-client`.
@@ -49,11 +54,10 @@ file, line, risk, and concrete fix. A blocker or major finding requires changes 
 
 ## Public-release gate
 
-Before changing `publish = false`, making the repository public, or applying an open-source license:
+Before changing `publish = false`, making the repository public, or changing the MIT license:
 
 1. Confirm provider terms permit the intended source distribution and branding.
 2. Complete a secret and proprietary-content scan, including Git history.
 3. Confirm all fixtures are synthetic and all documentation is public-safe.
 4. Run formatting, Clippy, tests, rustdoc, dependency, and license checks.
 5. Review the public API and commit to a compatibility policy.
-

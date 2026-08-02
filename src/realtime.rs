@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! `ProjectX` `SignalR`-over-WebSocket transport.
 
 use std::{

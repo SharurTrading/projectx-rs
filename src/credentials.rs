@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Secret credential ownership.
 
 use std::fmt;

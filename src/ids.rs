@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Validated provider identifier types.
 
 use std::{fmt, str::FromStr};

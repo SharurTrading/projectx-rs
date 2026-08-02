@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Kevin Monaghan
+# SPDX-License-Identifier: MIT
+
 [package]
 name = "projectx-client"
 version = "0.1.0"
@@ -6,7 +9,7 @@ rust-version = "1.85"
 description = "An async, provider-native Rust client for the ProjectX Gateway API"
 repository = "https://github.com/SharurTrading/projectx-rs"
 readme = "README.md"
-license-file = "LICENSE"
+license = "MIT"
 keywords = ["projectx", "topstepx", "trading", "futures", "api-client"]
 categories = ["api-bindings", "asynchronous", "network-programming"]
 publish = false

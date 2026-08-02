@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Public REST endpoint contract tests using synthetic local fixtures.
 
 use httpmock::{Mock, prelude::*};

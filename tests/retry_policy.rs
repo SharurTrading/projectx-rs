@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Kevin Monaghan
+// SPDX-License-Identifier: MIT
+
 //! Retry-policy contract tests using a deterministic local HTTP fixture.
 
 use std::time::Duration;
