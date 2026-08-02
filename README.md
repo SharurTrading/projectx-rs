@@ -5,6 +5,11 @@ SPDX-License-Identifier: MIT
 
 # projectx-rs
 
+[![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg)](https://crates.io/crates/projectx-client)
+[![docs.rs](https://docs.rs/projectx-client/badge.svg)](https://docs.rs/projectx-client)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An async, provider-native Rust client for the ProjectX Gateway API.
 
 This project is available under the [MIT License](LICENSE). It is an independent, unofficial client
@@ -16,6 +21,26 @@ reference for provider endpoints, request fields, response payloads, and subscri
 This README documents the additional safety and lifecycle behavior supplied by this client.
 
 The minimum supported Rust version is 1.95.0.
+
+Version 1 follows Semantic Versioning. Public API changes that require downstream source changes
+will be released under a new major version; additive APIs and fixes use minor and patch releases.
+Provider contract changes can still require callers to update operational behavior, so review the
+changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
+
+## Installation
+
+```sh
+cargo add projectx-client
+```
+
+Or add the current major release directly:
+
+```toml
+[dependencies]
+projectx-client = "1"
+```
+
+The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
 
 ## Design boundaries
 
@@ -34,20 +59,22 @@ The minimum supported Rust version is 1.95.0.
 
 ## Quick start
 
-```rust,no_run
+```rust
 use projectx_client::{Client, Credentials};
 
-# async fn run() -> Result<(), projectx_client::Error> {
-let credentials = Credentials::new("your-user-name", "your-api-key")?;
-let client = Client::builder(credentials).build()?;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), projectx_client::Error> {
+    let credentials = Credentials::new("your-user-name", "your-api-key")?;
+    let client = Client::builder(credentials).build()?;
 
-client.authenticate().await?;
-let accounts = client.search_active_accounts().await?;
-for account in accounts {
-    println!("{}", account.name);
+    client.authenticate().await?;
+    let accounts = client.search_active_accounts().await?;
+    for account in accounts {
+        println!("{}", account.name);
+    }
+
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 Applications should source secrets outside this library and must not log credentials or bearer
@@ -102,22 +129,23 @@ provider snapshot to translate at the consuming application's boundary.
 `authenticate()` performs API-key login and stores the bearer token privately. Applications that
 run for more than a short request cycle can instead use `authenticate_with_validation(period)`:
 
-```rust,no_run
+```rust
 use std::time::Duration;
 
 use projectx_client::{Client, Credentials};
 
-# async fn run() -> Result<(), projectx_client::Error> {
-let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
-let validator = client
-    .authenticate_with_validation(Duration::from_secs(15 * 60))
-    .await?;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), projectx_client::Error> {
+    let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
+    let validator = client
+        .authenticate_with_validation(Duration::from_mins(15))
+        .await?;
 
-// REST requests and real-time hubs created from `client` share the rotating token.
+    // REST requests and real-time hubs created from `client` share the rotating token.
 
-validator.shutdown().await?;
-# Ok(())
-# }
+    validator.shutdown().await?;
+    Ok(())
+}
 ```
 
 The validator periodically calls the provider's validation endpoint and atomically replaces the
@@ -198,38 +226,41 @@ as though no data were lost.
 
 ## Real-time example
 
-```rust,no_run
+```rust
 use projectx_client::{Client, ContractId, Credentials, Hub, RealtimeEvent};
 
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
-client.authenticate().await?;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
+    client.authenticate().await?;
 
-let realtime = client.realtime(Hub::Market);
-let mut events = realtime
-    .take_event_receiver()
-    .ok_or("event receiver was already claimed")?;
-realtime.connect().await?;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .ok_or_else(|| std::io::Error::other("event receiver was already claimed"))?;
+    realtime.connect().await?;
 
-let contract = ContractId::new("CON.F.US.MNQ.M26")?;
-realtime.subscribe_contract_trades(&contract).await?;
+    let contract = ContractId::new("CON.F.US.MNQ.M26")?;
+    realtime.subscribe_contract_trades(&contract).await?;
 
-while let Some(event) = events.recv().await {
-    match event {
-        RealtimeEvent::Reconnected => {
-            // Replay the application's canonical subscription set.
-            realtime.subscribe_contract_trades(&contract).await?;
+    while let Some(event) = events.recv().await {
+        match event {
+            RealtimeEvent::Reconnected => {
+                // Replay the application's canonical subscription set.
+                realtime.subscribe_contract_trades(&contract).await?;
+            }
+            RealtimeEvent::TransportGap => {
+                // Mark downstream state stale and start snapshot/reconciliation.
+                // Only after that recovery fence is installed may reconnect resume.
+                events.acknowledge_transport_gap();
+            }
+            _ => {}
         }
-        RealtimeEvent::TransportGap => {
-            // Mark downstream state stale and start snapshot/reconciliation.
-            // Only after that recovery fence is installed may reconnect resume.
-            events.acknowledge_transport_gap();
-        }
-        _ => {}
     }
+
+    realtime.disconnect().await?;
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 `take_event_receiver()` can be claimed once because events have a single ordered consumer. The

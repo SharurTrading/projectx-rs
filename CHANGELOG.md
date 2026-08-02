@@ -8,7 +8,9 @@ SPDX-License-Identifier: MIT
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## Unreleased
+## [Unreleased]
+
+## [1.0.0] - 2026-08-02
 
 - License the project under the MIT License and add SPDX file headers.
 - Establish the standalone ProjectX REST client boundary.
@@ -43,3 +45,6 @@ first public release.
 - Enforce strict Rust CI gates for formatting, strict pedantic Clippy, rustdoc, nextest,
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
+
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/SharurTrading/projectx-rs/releases/tag/v1.0.0

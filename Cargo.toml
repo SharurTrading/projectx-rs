@@ -3,16 +3,29 @@
 
 [package]
 name = "projectx-client"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 description = "An async, provider-native Rust client for the ProjectX Gateway API"
 repository = "https://github.com/SharurTrading/projectx-rs"
+homepage = "https://github.com/SharurTrading/projectx-rs"
+documentation = "https://docs.rs/projectx-client"
 readme = "README.md"
 license = "MIT"
 keywords = ["projectx", "topstepx", "trading", "futures", "api-client"]
 categories = ["api-bindings", "asynchronous", "network-programming"]
-publish = false
+publish = ["crates-io"]
+include = [
+    "/examples/**",
+    "/src/**",
+    "/tests/**",
+    "/CHANGELOG.md",
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/SECURITY.md",
+]
 
 [features]
 default = []
