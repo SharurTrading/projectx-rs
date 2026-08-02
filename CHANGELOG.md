@@ -21,3 +21,5 @@ first public release.
   locally throttled mutations before network submission.
 - Raise the minimum supported Rust version to 1.95.0 and update the HTTP and WebSocket stacks to
   `reqwest` 0.13 and `tokio-tungstenite` 0.30.
+- Enforce SHARUR-equivalent Rust CI gates for formatting, pedantic Clippy, rustdoc, nextest,
+  doctests, and dependency policy.

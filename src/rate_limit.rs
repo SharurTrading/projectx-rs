@@ -72,11 +72,13 @@ impl RateLimit {
     }
 
     /// Returns the maximum admitted requests in the rolling window.
+    #[must_use]
     pub const fn max_requests(self) -> usize {
         self.max_requests
     }
 
     /// Returns the rolling-window duration.
+    #[must_use]
     pub const fn window(self) -> Duration {
         self.window
     }
@@ -95,16 +97,19 @@ pub struct RateLimitConfig {
 
 impl RateLimitConfig {
     /// Creates configuration from dedicated history and general limits.
+    #[must_use]
     pub const fn new(history: RateLimit, general: RateLimit) -> Self {
         Self { history, general }
     }
 
     /// Returns the history endpoint limit.
+    #[must_use]
     pub const fn history(self) -> RateLimit {
         self.history
     }
 
     /// Returns the limit for all other authenticated endpoints.
+    #[must_use]
     pub const fn general(self) -> RateLimit {
         self.general
     }

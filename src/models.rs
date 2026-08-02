@@ -23,6 +23,7 @@ pub enum Side {
 
 impl Side {
     /// Returns the provider's numeric wire code.
+    #[must_use]
     pub const fn code(self) -> i32 {
         match self {
             Self::Bid => 0,
@@ -76,6 +77,7 @@ pub enum OrderType {
 
 impl OrderType {
     /// Returns the provider's numeric wire code.
+    #[must_use]
     pub const fn code(self) -> i32 {
         match self {
             Self::Limit => 1,
@@ -131,6 +133,7 @@ pub enum PositionType {
 
 impl PositionType {
     /// Returns the provider's numeric wire code.
+    #[must_use]
     pub const fn code(self) -> i32 {
         match self {
             Self::Undefined => 0,
@@ -198,6 +201,7 @@ pub enum DepthType {
 
 impl DepthType {
     /// Returns the provider's numeric wire code.
+    #[must_use]
     pub const fn code(self) -> i32 {
         match self {
             Self::Unknown => 0,

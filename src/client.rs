@@ -65,6 +65,7 @@ impl Client {
     ///
     /// The returned hub snapshots the current token immediately before every
     /// initial connection and reconnect. Call [`Self::authenticate`] first.
+    #[must_use]
     pub fn realtime(&self, hub: Hub) -> RealtimeClient {
         RealtimeClient::new(hub, self.endpoints.clone(), Arc::clone(&self.token))
     }

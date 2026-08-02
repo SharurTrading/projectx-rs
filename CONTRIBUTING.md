@@ -8,10 +8,12 @@ SPDX-License-Identifier: MIT
 Contributions are welcome. Changes must follow `AGENTS.md` and pass:
 
 ```text
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-RUSTDOCFLAGS=-Dwarnings cargo doc --all-features --no-deps
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings -D clippy::pedantic
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps --locked
+cargo nextest run --all-features --locked --no-fail-fast
+cargo test --doc --all-features --locked
+cargo deny check
 ```
 
 Never add live credentials, captured account data, private-platform dependencies, or generated

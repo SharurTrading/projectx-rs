@@ -113,22 +113,26 @@ impl SignalRInvocation {
     }
 
     /// Returns the provider invocation target.
+    #[must_use]
     pub fn target(&self) -> &str {
         &self.target
     }
 
     /// Returns the market contract argument, when supplied.
+    #[must_use]
     pub fn contract_id(&self) -> Option<&ContractId> {
         self.contract_id.as_ref()
     }
 
     /// Returns the raw provider payload.
+    #[must_use]
     pub fn payload(&self) -> &Value {
         &self.payload
     }
 
     /// Returns the event entity, unwrapping a provider `{ "data": ... }`
     /// envelope when present.
+    #[must_use]
     pub fn entity(&self) -> &Value {
         self.payload
             .get("data")
@@ -180,6 +184,7 @@ pub struct RealtimeEventReceiver {
 
 impl RealtimeEventReceiver {
     /// Returns whether every producer for this event stream is gone.
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.events.is_closed()
     }
@@ -404,6 +409,7 @@ impl RealtimeClient {
     }
 
     /// Returns whether the latest connection completed its `SignalR` handshake.
+    #[must_use]
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
     }

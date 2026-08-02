@@ -16,6 +16,7 @@ pub struct Endpoints {
 
 impl Endpoints {
     /// Returns the hosted `TopstepX` endpoints.
+    #[must_use]
     pub fn topstepx() -> Self {
         Self {
             api_base: "https://api.topstepx.com/".to_owned(),
@@ -60,11 +61,13 @@ impl Endpoints {
     }
 
     /// Returns the configured REST base URL.
+    #[must_use]
     pub fn api_base(&self) -> &str {
         &self.api_base
     }
 
     /// Returns the configured real-time base URL.
+    #[must_use]
     pub fn realtime_base(&self) -> &str {
         &self.realtime_base
     }
