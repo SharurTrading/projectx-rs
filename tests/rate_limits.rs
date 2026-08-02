@@ -82,7 +82,7 @@ async fn cloned_clients_share_capacity_and_local_mutation_rejection_sends_nothin
                 .json_body(json!({"orderId": 84, "success": true}));
         })
         .await;
-    let window = Duration::from_secs(60);
+    let window = Duration::from_mins(1);
     let client = fixture_client(&server, limits(1, window), 0);
     authenticate(&client, &server).await;
 
@@ -124,7 +124,7 @@ async fn retrieve_bars_uses_a_budget_independent_from_general_queries() {
                 .json_body(json!({"bars": [], "success": true}));
         })
         .await;
-    let client = fixture_client(&server, limits(1, Duration::from_secs(60)), 0);
+    let client = fixture_client(&server, limits(1, Duration::from_mins(1)), 0);
     authenticate(&client, &server).await;
 
     client
@@ -166,7 +166,7 @@ async fn provider_retry_after_cools_the_shared_budget() {
                 .json_body(json!({"orderId": 84, "success": true}));
         })
         .await;
-    let client = fixture_client(&server, limits(10, Duration::from_secs(60)), 0);
+    let client = fixture_client(&server, limits(10, Duration::from_mins(1)), 0);
     authenticate(&client, &server).await;
 
     let query_error = client
@@ -178,7 +178,7 @@ async fn provider_retry_after_cools_the_shared_budget() {
         Error::ProviderRateLimited {
             kind: RateLimitKind::General,
             retry_after
-        } if retry_after == Duration::from_secs(60)
+        } if retry_after == Duration::from_mins(1)
     ));
 
     let mutation_error = client
@@ -205,7 +205,7 @@ async fn provider_rate_limit_after_mutation_send_is_ambiguous_and_never_retried(
             then.status(429).header("Retry-After", "1");
         })
         .await;
-    let client = fixture_client(&server, limits(10, Duration::from_secs(60)), 3);
+    let client = fixture_client(&server, limits(10, Duration::from_mins(1)), 3);
     authenticate(&client, &server).await;
 
     let error = client
@@ -245,7 +245,7 @@ async fn session_validator_shutdown_cancels_a_rate_limit_wait() {
             then.status(200).json_body(json!({"success": true}));
         })
         .await;
-    let client = fixture_client(&server, limits(1, Duration::from_secs(60)), 0);
+    let client = fixture_client(&server, limits(1, Duration::from_mins(1)), 0);
     let validator = client
         .authenticate_with_validation(Duration::from_secs(1))
         .await

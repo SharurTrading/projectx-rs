@@ -28,12 +28,12 @@ use crate::{
     token::TokenStore,
 };
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
-const MAX_SERVER_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_SERVER_RETRY_AFTER: Duration = Duration::from_hours(24);
 const USER_AGENT: &str = "projectx-client/0.1.0";
 
 /// Authenticated `ProjectX` REST client.

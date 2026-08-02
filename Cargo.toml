@@ -5,7 +5,7 @@
 name = "projectx-client"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "An async, provider-native Rust client for the ProjectX Gateway API"
 repository = "https://github.com/SharurTrading/projectx-rs"
 readme = "README.md"
@@ -22,7 +22,7 @@ live-tests = []
 futures-util = "0.3"
 httpdate = "1"
 parking_lot = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 rust_decimal = { version = "1.37", features = ["serde-arbitrary-precision"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +30,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde_repr = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 url = "2"

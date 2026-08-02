@@ -13,7 +13,7 @@ use crate::Error;
 const DEFAULT_HISTORY_REQUESTS: usize = 50;
 const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
 const DEFAULT_GENERAL_REQUESTS: usize = 200;
-const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_secs(60);
+const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_mins(1);
 
 /// Identifies one provider REST rate-limit budget.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -354,7 +354,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn later_provider_cooldown_cannot_be_shortened() {
-        let limits = limits(200, Duration::from_secs(60));
+        let limits = limits(200, Duration::from_mins(1));
         limits.cool_down(RateLimitKind::General, Duration::from_secs(30));
         limits.cool_down(RateLimitKind::General, Duration::from_secs(5));
         assert_eq!(
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(config.history().max_requests(), 50);
         assert_eq!(config.history().window(), Duration::from_secs(30));
         assert_eq!(config.general().max_requests(), 200);
-        assert_eq!(config.general().window(), Duration::from_secs(60));
+        assert_eq!(config.general().window(), Duration::from_mins(1));
     }
 
     #[test]

@@ -19,3 +19,5 @@ first public release.
 - Preserve unknown provider enum codes and add an ignored read-only live probe.
 - Enforce ProjectX rolling-window REST limits across cloned clients, honor `Retry-After`, and reject
   locally throttled mutations before network submission.
+- Raise the minimum supported Rust version to 1.95.0 and update the HTTP and WebSocket stacks to
+  `reqwest` 0.13 and `tokio-tungstenite` 0.30.

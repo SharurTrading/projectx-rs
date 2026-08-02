@@ -15,6 +15,8 @@ Use the official [ProjectX Gateway API documentation](https://gateway.docs.proje
 reference for provider endpoints, request fields, response payloads, and subscription requirements.
 This README documents the additional safety and lifecycle behavior supplied by this client.
 
+The minimum supported Rust version is 1.95.0.
+
 ## Design boundaries
 
 - No trading-platform or application dependencies.
