@@ -325,6 +325,44 @@ fn invocation_decodes_exact_decimal_payload() {
     assert_eq!(trade.trade_type, projectx_client::TradeLogType::Buy);
 }
 
+#[test]
+fn invocation_batch_decodes_exact_entries_independently() {
+    let invocation = SignalRInvocation::from_json(
+        r#"{
+            "type": 1,
+            "target": "GatewayTrade",
+            "arguments": [
+                "CON.F.US.MNQ.M26",
+                [
+                    null,
+                    {
+                        "symbolId": "F.US.MNQ",
+                        "price": 0.1000000000000000000000000001,
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "type": 0,
+                        "volume": 1
+                    },
+                    {"symbolId": "malformed"}
+                ]
+            ]
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    let decoded = invocation.decode_batch::<projectx_client::MarketTrade>();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(
+        decoded[0]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("first trade must decode: {error}"))
+            .price
+            .to_string(),
+        "0.1000000000000000000000000001"
+    );
+    assert!(decoded[1].is_err());
+}
+
 #[tokio::test]
 async fn concurrent_connect_installs_exactly_one_session() {
     let http = MockServer::start_async().await;

@@ -337,6 +337,30 @@ impl SignalRInvocation {
     {
         serde_json::from_str(self.raw_entity.get()).map_err(RealtimeError::Decode)
     }
+
+    /// Deserializes a single entity or every non-null entry in an entity array.
+    ///
+    /// Each array entry is decoded independently so one malformed provider
+    /// record does not hide the other valid records in the same invocation.
+    /// `ProjectX`'s null padding entries are omitted.
+    #[must_use]
+    pub fn decode_batch<T>(&self) -> Vec<Result<T, RealtimeError>>
+    where
+        T: DeserializeOwned,
+    {
+        if !self.entity().is_array() {
+            return vec![self.decode()];
+        }
+        let values = match serde_json::from_str::<Vec<Box<RawValue>>>(self.raw_entity.get()) {
+            Ok(values) => values,
+            Err(error) => return vec![Err(RealtimeError::Decode(error))],
+        };
+        values
+            .into_iter()
+            .filter(|value| value.get() != "null")
+            .map(|value| serde_json::from_str(value.get()).map_err(RealtimeError::Decode))
+            .collect()
+    }
 }
 
 /// Events emitted by a [`RealtimeClient`].
