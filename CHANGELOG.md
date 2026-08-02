@@ -56,5 +56,6 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SharurTrading/projectx-rs/releases/tag/v1.0.0
