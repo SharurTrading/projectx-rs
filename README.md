@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg)](https://crates.io/crates/projectx-client)
-[![docs.rs](https://docs.rs/projectx-client/badge.svg)](https://docs.rs/projectx-client)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?release=1.0.1)](https://crates.io/crates/projectx-client/1.0.1)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/1.0.1?release=1.0.1)](https://docs.rs/projectx-client/1.0.1/projectx_client/)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
