@@ -19,8 +19,9 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use parking_lot::Mutex as ParkingMutex;
 use rand::{TryRng as _, rngs::SysRng};
 use reqwest::{StatusCode, Version, header};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use sha1::{Digest as _, Sha1};
 use thiserror::Error;
 use tokio::{
@@ -144,11 +145,21 @@ impl Hub {
 }
 
 /// A decoded `SignalR` invocation frame.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SignalRInvocation {
     target: String,
     contract_id: Option<ContractId>,
     payload: Value,
+    raw_entity: Box<RawValue>,
+}
+
+impl PartialEq for SignalRInvocation {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.contract_id == other.contract_id
+            && self.payload == other.payload
+            && self.raw_entity.get() == other.raw_entity.get()
+    }
 }
 
 impl SignalRInvocation {
@@ -200,10 +211,90 @@ impl SignalRInvocation {
                 "invocation contained too many arguments",
             ));
         }
+        let entity = payload
+            .get("data")
+            .filter(|data| data.is_object() || data.is_array())
+            .unwrap_or(&payload);
+        let raw_entity =
+            RawValue::from_string(serde_json::to_string(entity).map_err(RealtimeError::Decode)?)
+                .map_err(RealtimeError::Decode)?;
         Ok(Some(Self {
             target,
             contract_id,
             payload,
+            raw_entity,
+        }))
+    }
+
+    /// Decodes a type-1 `SignalR` invocation directly from its JSON record.
+    ///
+    /// Unlike [`Self::from_value`], this path retains the original JSON token
+    /// for the event entity so exact provider decimals do not first pass
+    /// through a floating-point `serde_json::Value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record is malformed or has an invalid target,
+    /// contract identifier, or payload argument list.
+    pub fn from_json(json: &str) -> Result<Option<Self>, RealtimeError> {
+        #[derive(Deserialize)]
+        struct InvocationFrame {
+            #[serde(rename = "type")]
+            message_type: u64,
+            target: Option<String>,
+            arguments: Option<Vec<Box<RawValue>>>,
+        }
+
+        let frame: InvocationFrame = serde_json::from_str(json).map_err(RealtimeError::Decode)?;
+        if frame.message_type != 1 {
+            return Ok(None);
+        }
+        let target = frame
+            .target
+            .ok_or(RealtimeError::Protocol("invocation target is missing"))?;
+        let mut arguments = frame
+            .arguments
+            .ok_or(RealtimeError::Protocol("invocation arguments are missing"))?
+            .into_iter();
+        let first = arguments
+            .next()
+            .ok_or(RealtimeError::Protocol("invocation payload is missing"))?;
+        let (contract_id, raw_payload) = match arguments.next() {
+            Some(second) => {
+                let contract = serde_json::from_str::<String>(first.get()).map_err(|_| {
+                    RealtimeError::Protocol("market contract identifier was not a string")
+                })?;
+                let contract_id = ContractId::new(contract)
+                    .map_err(|_| RealtimeError::Protocol("contract identifier is invalid"))?;
+                (Some(contract_id), second)
+            }
+            None => (None, first),
+        };
+        if arguments.next().is_some() {
+            return Err(RealtimeError::Protocol(
+                "invocation contained too many arguments",
+            ));
+        }
+        let payload: Value =
+            serde_json::from_str(raw_payload.get()).map_err(RealtimeError::Decode)?;
+        let raw_entity = if payload
+            .get("data")
+            .is_some_and(|data| data.is_object() || data.is_array())
+        {
+            let mut object =
+                serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw_payload.get())
+                    .map_err(RealtimeError::Decode)?;
+            object.remove("data").ok_or(RealtimeError::Protocol(
+                "invocation data envelope is missing",
+            ))?
+        } else {
+            raw_payload
+        };
+        Ok(Some(Self {
+            target,
+            contract_id,
+            payload,
+            raw_entity,
         }))
     }
 
@@ -244,7 +335,31 @@ impl SignalRInvocation {
     where
         T: DeserializeOwned,
     {
-        T::deserialize(self.entity()).map_err(RealtimeError::Decode)
+        serde_json::from_str(self.raw_entity.get()).map_err(RealtimeError::Decode)
+    }
+
+    /// Deserializes a single entity or every non-null entry in an entity array.
+    ///
+    /// Each array entry is decoded independently so one malformed provider
+    /// record does not hide the other valid records in the same invocation.
+    /// `ProjectX`'s null padding entries are omitted.
+    #[must_use]
+    pub fn decode_batch<T>(&self) -> Vec<Result<T, RealtimeError>>
+    where
+        T: DeserializeOwned,
+    {
+        if !self.entity().is_array() {
+            return vec![self.decode()];
+        }
+        let values = match serde_json::from_str::<Vec<Box<RawValue>>>(self.raw_entity.get()) {
+            Ok(values) => values,
+            Err(error) => return vec![Err(RealtimeError::Decode(error))],
+        };
+        values
+            .into_iter()
+            .filter(|value| value.get() != "null")
+            .map(|value| serde_json::from_str(value.get()).map_err(RealtimeError::Decode))
+            .collect()
     }
 }
 
@@ -266,7 +381,12 @@ pub enum RealtimeEvent {
     /// Callers must fence recovery and then call
     /// [`RealtimeEventReceiver::acknowledge_transport_gap`].
     TransportGap,
+    /// A provider type-1 invocation with an exact raw entity retained for typed decoding.
+    Invocation(SignalRInvocation),
     /// A decoded `SignalR` JSON message.
+    ///
+    /// Type-1 invocations are emitted through [`Self::Invocation`]; this
+    /// variant carries other application-visible message families.
     Message(Value),
 }
 
@@ -1651,6 +1771,20 @@ impl RealtimeInner {
                     "message type was not an unsigned integer",
                 ))?;
             match message_type {
+                1 => {
+                    let invocation = SignalRInvocation::from_json(frame)?.ok_or(
+                        RealtimeError::Protocol("type-1 frame was not an invocation"),
+                    )?;
+                    let weight = frame
+                        .len()
+                        .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
+                        .saturating_add(EVENT_BASE_WEIGHT);
+                    if self.publish(generation, RealtimeEvent::Invocation(invocation), weight)?
+                        == PublishOutcome::StaleGeneration
+                    {
+                        return Ok(ProcessOutcome::Close);
+                    }
+                }
                 3 => {
                     let (invocation_id, result) = completion(&value)?;
                     let reply = {

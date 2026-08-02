@@ -10,6 +10,16 @@ first public release.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-02
+
+### Fixed
+
+- Preserve exact REST and SignalR decimal tokens without enabling global `rust_decimal` or
+  `serde_json` arbitrary-precision features that can alter unrelated downstream serialization
+  through Cargo feature unification.
+- Emit type-1 real-time frames as exact `RealtimeEvent::Invocation` values; typed invocation
+  decoding now reads the retained raw entity token.
+
 ## [1.0.0] - 2026-08-02
 
 - License the project under the MIT License and add SPDX file headers.

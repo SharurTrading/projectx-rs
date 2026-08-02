@@ -299,7 +299,7 @@ async fn real_time_connect_fails_closed_before_authentication() {
 
 #[test]
 fn invocation_decodes_exact_decimal_payload() {
-    let value: Value = serde_json::from_str(
+    let invocation = SignalRInvocation::from_json(
         r#"{
             "type": 1,
             "target": "GatewayTrade",
@@ -315,15 +315,52 @@ fn invocation_decodes_exact_decimal_payload() {
             ]
         }"#,
     )
-    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"));
-    let invocation = SignalRInvocation::from_value(value)
-        .and_then(|value| value.ok_or(RealtimeError::Protocol("missing invocation")))
-        .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
     let trade: projectx_client::MarketTrade = invocation
         .decode()
         .unwrap_or_else(|error| panic!("fixture market trade must decode: {error}"));
     assert_eq!(trade.price.to_string(), "0.1000000000000000000000000001");
     assert_eq!(trade.trade_type, projectx_client::TradeLogType::Buy);
+}
+
+#[test]
+fn invocation_batch_decodes_exact_entries_independently() {
+    let invocation = SignalRInvocation::from_json(
+        r#"{
+            "type": 1,
+            "target": "GatewayTrade",
+            "arguments": [
+                "CON.F.US.MNQ.M26",
+                [
+                    null,
+                    {
+                        "symbolId": "F.US.MNQ",
+                        "price": 0.1000000000000000000000000001,
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "type": 0,
+                        "volume": 1
+                    },
+                    {"symbolId": "malformed"}
+                ]
+            ]
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    let decoded = invocation.decode_batch::<projectx_client::MarketTrade>();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(
+        decoded[0]
+            .as_ref()
+            .unwrap_or_else(|error| panic!("first trade must decode: {error}"))
+            .price
+            .to_string(),
+        "0.1000000000000000000000000001"
+    );
+    assert!(decoded[1].is_err());
 }
 
 #[tokio::test]

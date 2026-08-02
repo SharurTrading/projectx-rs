@@ -3,8 +3,11 @@
 
 //! Provider-native request and response models.
 
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use thiserror::Error;
 
@@ -443,7 +446,7 @@ pub struct Account {
     /// Provider display name.
     pub name: String,
     /// Current account balance, when included by the endpoint.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub balance: Option<Decimal>,
     /// Whether the provider permits trading.
     pub can_trade: bool,
@@ -466,10 +469,10 @@ pub struct Contract {
     /// Human-readable description.
     pub description: String,
     /// Minimum price increment.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub tick_size: Decimal,
     /// Monetary value of one tick.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub tick_value: Decimal,
     /// Whether this is the provider's active contract.
     pub active_contract: bool,
@@ -652,16 +655,16 @@ pub struct Bar {
     /// Provider timestamp.
     pub t: Timestamp,
     /// Open price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub o: Decimal,
     /// High price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub h: Decimal,
     /// Low price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub l: Decimal,
     /// Close price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub c: Decimal,
     /// Provider volume units.
     pub v: i64,
@@ -994,16 +997,16 @@ pub struct Order {
     /// Ordered quantity.
     pub size: i32,
     /// Optional limit price.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub limit_price: Option<Decimal>,
     /// Optional stop price.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub stop_price: Option<Decimal>,
     /// Optional cumulative filled quantity.
     #[serde(default)]
     pub fill_volume: Option<i32>,
     /// Optional average fill price.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub filled_price: Option<Decimal>,
     /// Optional caller tag.
     #[serde(default)]
@@ -1012,7 +1015,7 @@ pub struct Order {
     #[serde(default)]
     pub trail_distance: Option<i32>,
     /// Optional current trailing-stop price.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub trail_price: Option<Decimal>,
     /// Parent order for a bracket child, when supplied.
     #[serde(default)]
@@ -1139,19 +1142,19 @@ pub struct PlaceOrder {
     /// Optional limit price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     limit_price: Option<Decimal>,
     /// Optional stop price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     stop_price: Option<Decimal>,
     /// Optional trailing price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     trail_price: Option<Decimal>,
     /// Optional caller tag. It must be unique within the account.
@@ -1389,19 +1392,19 @@ pub struct ModifyOrder {
     /// Optional replacement limit price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     limit_price: Option<Decimal>,
     /// Optional replacement stop price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     stop_price: Option<Decimal>,
     /// Optional replacement trailing price.
     #[serde(
         skip_serializing_if = "Option::is_none",
-        with = "rust_decimal::serde::arbitrary_precision_option"
+        with = "crate::decimal_serde::option"
     )]
     trail_price: Option<Decimal>,
 }
@@ -1608,7 +1611,7 @@ pub struct Position {
     /// Signed or directional provider quantity.
     pub size: i32,
     /// Average entry price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub average_price: Decimal,
 }
 
@@ -1689,16 +1692,16 @@ pub struct Trade {
     /// Provider creation timestamp.
     pub creation_timestamp: Timestamp,
     /// Execution price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub price: Decimal,
     /// Optional realized P&L.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub profit_and_loss: Option<Decimal>,
     /// Provider fees.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub fees: Decimal,
     /// Optional provider commissions, separate from fees.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub commissions: Option<Decimal>,
     /// Execution side.
     pub side: Side,
@@ -1722,28 +1725,28 @@ pub struct MarketQuote {
     #[serde(default)]
     pub symbol_name: Option<String>,
     /// Last trade price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub last_price: Decimal,
     /// Best bid price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub best_bid: Decimal,
     /// Best ask price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub best_ask: Decimal,
     /// Session price change.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub change: Decimal,
     /// Session percent change.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub change_percent: Decimal,
     /// Session open.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub open: Option<Decimal>,
     /// Session high.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub high: Option<Decimal>,
     /// Session low.
-    #[serde(default, with = "rust_decimal::serde::arbitrary_precision_option")]
+    #[serde(default, with = "crate::decimal_serde::option")]
     pub low: Option<Decimal>,
     /// Session cumulative volume.
     pub volume: i64,
@@ -1767,7 +1770,7 @@ pub struct MarketDepth {
     #[serde(rename = "type")]
     pub depth_type: DepthType,
     /// Price level.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub price: Decimal,
     /// Incremental volume for the update.
     pub volume: i64,
@@ -1786,7 +1789,7 @@ pub struct MarketTrade {
     /// Provider symbol identifier.
     pub symbol_id: SymbolId,
     /// Trade price.
-    #[serde(with = "rust_decimal::serde::arbitrary_precision")]
+    #[serde(with = "crate::decimal_serde")]
     pub price: Decimal,
     /// Event timestamp.
     pub timestamp: Timestamp,
@@ -1819,18 +1822,15 @@ where
     {
         use serde::de::Error as _;
 
-        let serde_json::Value::Object(mut object) = serde_json::Value::deserialize(deserializer)?
-        else {
-            return Err(D::Error::custom("provider response must be an object"));
-        };
+        let mut object = BTreeMap::<String, Box<RawValue>>::deserialize(deserializer)?;
         let success = object
             .remove("success")
-            .and_then(|value| value.as_bool())
-            .ok_or_else(|| D::Error::custom("provider response success flag is missing"))?;
+            .ok_or_else(|| D::Error::custom("provider response success flag is missing"))
+            .and_then(|value| serde_json::from_str(value.get()).map_err(D::Error::custom))?;
         let error_code = object
             .remove("errorCode")
             .ok_or_else(|| D::Error::custom("provider response error code is missing"))
-            .and_then(|value| serde_json::from_value(value).map_err(D::Error::custom))?;
+            .and_then(|value| serde_json::from_str(value.get()).map_err(D::Error::custom))?;
         object.remove("errorMessage");
         if success != (error_code == 0) {
             return Ok(Self::InconsistentStatus {
@@ -1841,8 +1841,17 @@ where
         if !success {
             return Ok(Self::Rejected { error_code });
         }
-        let body =
-            serde_json::from_value(serde_json::Value::Object(object)).map_err(D::Error::custom)?;
+        let mut body_json = String::from("{");
+        for (index, (key, value)) in object.into_iter().enumerate() {
+            if index > 0 {
+                body_json.push(',');
+            }
+            body_json.push_str(&serde_json::to_string(&key).map_err(D::Error::custom)?);
+            body_json.push(':');
+            body_json.push_str(value.get());
+        }
+        body_json.push('}');
+        let body = serde_json::from_str(&body_json).map_err(D::Error::custom)?;
         Ok(Self::Accepted(body))
     }
 }

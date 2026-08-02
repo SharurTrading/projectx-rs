@@ -30,6 +30,7 @@
 mod client;
 mod config;
 mod credentials;
+mod decimal_serde;
 mod error;
 mod ids;
 mod models;
