@@ -104,6 +104,23 @@ fn trade_query_serializes_independently_optional_bounds() {
         json!({"accountId": 42})
     );
 
+    let start = timestamp("2026-01-01T00:00:00Z");
+    let start_only = TradeQuery::builder(account_id())
+        .start_timestamp(start)
+        .build()
+        .unwrap_or_else(|error| panic!("start-only trade query must build: {error}"));
+    assert_eq!(start_only.account_id(), account_id());
+    assert_eq!(start_only.start_timestamp(), Some(start));
+    assert_eq!(start_only.end_timestamp(), None);
+    assert_eq!(
+        serde_json::to_value(start_only)
+            .unwrap_or_else(|error| panic!("trade query must serialize: {error}")),
+        json!({
+            "accountId": 42,
+            "startTimestamp": "2026-01-01T00:00:00Z"
+        })
+    );
+
     let end = timestamp("2026-01-02T00:00:00Z");
     let end_only = TradeQuery::builder(account_id())
         .end_timestamp(end)

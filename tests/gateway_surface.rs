@@ -35,8 +35,9 @@ fn every_documented_operation_is_named_in_the_client_source() {
             panic!("invalid operation manifest entry: {operation}");
         };
         assert!(matches!(method, "GET" | "POST"));
+        let route_literal = format!("\"{}\"", path.trim_start_matches('/'));
         assert!(
-            CLIENT_SOURCE.contains(path.trim_start_matches('/')),
+            CLIENT_SOURCE.contains(&route_literal),
             "client route is missing for {operation}"
         );
     }

@@ -214,3 +214,88 @@ fn validate_secret(name: &str, value: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const USER_NAME: &str = "synthetic-user";
+    const PASSWORD: &str = "synthetic-password";
+    const DEVICE_ID: &str = "synthetic-device";
+    const APP_ID: &str = "synthetic-app";
+    const VERIFY_KEY: &str = "synthetic-verify-key";
+
+    fn build_application_credentials(
+        user_name: &str,
+        password: &str,
+        device_id: &str,
+        app_id: &str,
+        verify_key: &str,
+    ) -> Result<ApplicationCredentials, Error> {
+        ApplicationCredentials::builder(user_name, password)
+            .device_id(device_id)
+            .app_id(app_id)
+            .verify_key(verify_key)
+            .build()
+    }
+
+    #[test]
+    fn validate_secret_rejects_empty_and_padded_values() {
+        assert!(matches!(
+            validate_secret("fixture", ""),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            validate_secret("fixture", " padded "),
+            Err(Error::Configuration(_))
+        ));
+        assert!(validate_secret("fixture", "valid-value").is_ok());
+    }
+
+    #[test]
+    fn application_credentials_require_device_application_and_verification_fields() {
+        assert!(matches!(
+            ApplicationCredentials::builder(USER_NAME, PASSWORD).build(),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            ApplicationCredentials::builder(USER_NAME, PASSWORD)
+                .device_id(DEVICE_ID)
+                .build(),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            ApplicationCredentials::builder(USER_NAME, PASSWORD)
+                .device_id(DEVICE_ID)
+                .app_id(APP_ID)
+                .build(),
+            Err(Error::Configuration(_))
+        ));
+    }
+
+    #[test]
+    fn application_credentials_reject_empty_or_padded_values() {
+        for result in [
+            build_application_credentials("", PASSWORD, DEVICE_ID, APP_ID, VERIFY_KEY),
+            build_application_credentials(" padded ", PASSWORD, DEVICE_ID, APP_ID, VERIFY_KEY),
+            build_application_credentials(USER_NAME, "", DEVICE_ID, APP_ID, VERIFY_KEY),
+            build_application_credentials(USER_NAME, " padded ", DEVICE_ID, APP_ID, VERIFY_KEY),
+            build_application_credentials(USER_NAME, PASSWORD, "", APP_ID, VERIFY_KEY),
+            build_application_credentials(USER_NAME, PASSWORD, " padded ", APP_ID, VERIFY_KEY),
+            build_application_credentials(USER_NAME, PASSWORD, DEVICE_ID, "", VERIFY_KEY),
+            build_application_credentials(USER_NAME, PASSWORD, DEVICE_ID, " padded ", VERIFY_KEY),
+            build_application_credentials(USER_NAME, PASSWORD, DEVICE_ID, APP_ID, ""),
+            build_application_credentials(USER_NAME, PASSWORD, DEVICE_ID, APP_ID, " padded "),
+        ] {
+            assert!(matches!(result, Err(Error::Configuration(_))));
+        }
+    }
+
+    #[test]
+    fn application_credentials_build_with_valid_values() {
+        assert!(
+            build_application_credentials(USER_NAME, PASSWORD, DEVICE_ID, APP_ID, VERIFY_KEY)
+                .is_ok()
+        );
+    }
+}

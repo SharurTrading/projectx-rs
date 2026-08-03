@@ -579,20 +579,7 @@ async fn trade_search_mock(server: &MockServer) -> Mock<'_> {
                     "startTimestamp": "2026-01-01T00:00:00Z"
                 }));
             then.status(200).json_body(json!({
-                "trades": [{
-                    "id": 63,
-                    "accountId": 42,
-                    "contractId": "CON.F.US.MNQ.M26",
-                    "creationTimestamp": "2026-01-01T00:00:01Z",
-                    "price": 100.25,
-                    "profitAndLoss": 5.00,
-                    "fees": 1.40,
-                    "commissions": 0.45,
-                    "side": 1,
-                    "size": 1,
-                    "voided": false,
-                    "orderId": 84
-                }],
+                "trades": [trade_json()],
                 "success": true,
                 "errorCode": 0
             }));

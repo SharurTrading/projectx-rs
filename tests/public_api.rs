@@ -174,6 +174,24 @@ async fn application_authentication_ping_and_logout_match_provider_contracts() {
 }
 
 #[tokio::test]
+async fn ping_rejects_a_non_exact_status_body() {
+    let server = MockServer::start_async().await;
+    let ping = server
+        .mock_async(|when, then| {
+            when.method(GET).path("/api/Status/ping");
+            then.status(200).body("pong\n");
+        })
+        .await;
+    let client = fixture_client(&server);
+
+    assert!(matches!(
+        client.ping().await,
+        Err(Error::UnexpectedStatusResponse)
+    ));
+    ping.assert_async().await;
+}
+
+#[tokio::test]
 async fn cancelled_logout_invalidates_only_its_admitted_session() {
     let server = MockServer::start_async().await;
     let _login = server
@@ -221,6 +239,7 @@ async fn provider_rate_limited_logout_retains_the_session() {
     let logout = server
         .mock_async(|when, then| {
             when.method(POST).path("/api/Auth/logout");
+            // Zero keeps the shared cooldown clear so the account search proceeds immediately.
             then.status(429).header("retry-after", "0");
         })
         .await;
@@ -268,22 +287,26 @@ fn credentials_are_redacted_and_identifiers_validate() {
         .device_id("private-device")
         .app_id("private-app")
         .verify_key("private-verify-key");
-    let builder_debug = format!("{builder:?}");
-    for secret in [
+    let secrets = [
         "private-app-user",
         "private-password",
         "private-device",
         "private-app",
         "private-verify-key",
-    ] {
+    ];
+    let builder_debug = format!("{builder:?}");
+    for secret in secrets {
         assert!(!builder_debug.contains(secret));
     }
+    assert!(builder_debug.contains("[REDACTED]"));
     let application = builder
         .build()
         .unwrap_or_else(|error| panic!("fixture application credentials must be valid: {error}"));
     let application_debug = format!("{application:?}");
-    assert!(!application_debug.contains("private-password"));
-    assert!(!application_debug.contains("private-verify-key"));
+    for secret in secrets {
+        assert!(!application_debug.contains(secret));
+    }
+    assert!(application_debug.contains("[REDACTED]"));
     assert!(matches!(
         ApplicationCredentials::builder("private-app-user", "private-password").build(),
         Err(Error::Configuration(_))

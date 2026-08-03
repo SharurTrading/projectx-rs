@@ -392,11 +392,8 @@ impl Client {
             Err(error) => return Err(Error::Transport(error)),
         };
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
-                .unwrap_or_else(|| self.rate_limits.limit(RateLimitKind::General).window())
-                .min(MAX_SERVER_RETRY_AFTER);
-            self.rate_limits
-                .cool_down(RateLimitKind::General, retry_after);
+            let retry_after =
+                self.apply_provider_cooldown(RateLimitKind::General, response.headers());
             attempt.retain_session();
             return Err(Error::ProviderRateLimited {
                 kind: RateLimitKind::General,
@@ -898,10 +895,7 @@ impl Client {
             .body(body.to_vec());
         let response = request.send().await.map_err(Error::Transport)?;
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
-                .unwrap_or_else(|| self.rate_limits.limit(kind).window())
-                .min(MAX_SERVER_RETRY_AFTER);
-            self.rate_limits.cool_down(kind, retry_after);
+            let retry_after = self.apply_provider_cooldown(kind, response.headers());
             return Err(Error::ProviderRateLimited { kind, retry_after });
         }
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -960,11 +954,8 @@ impl Client {
             Err(_error) => return Err(Error::AmbiguousSessionValidation),
         };
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
-                .unwrap_or_else(|| self.rate_limits.limit(RateLimitKind::General).window())
-                .min(MAX_SERVER_RETRY_AFTER);
-            self.rate_limits
-                .cool_down(RateLimitKind::General, retry_after);
+            let retry_after =
+                self.apply_provider_cooldown(RateLimitKind::General, response.headers());
             attempt.disarm();
             return Err(Error::ProviderRateLimited {
                 kind: RateLimitKind::General,
@@ -978,6 +969,18 @@ impl Client {
             return Err(Error::AmbiguousSessionValidation);
         }
         Ok((response, attempt))
+    }
+
+    fn apply_provider_cooldown(
+        &self,
+        kind: RateLimitKind,
+        headers: &header::HeaderMap,
+    ) -> Duration {
+        let retry_after = parse_retry_after(headers, SystemTime::now())
+            .unwrap_or_else(|| self.rate_limits.limit(kind).window())
+            .min(MAX_SERVER_RETRY_AFTER);
+        self.rate_limits.cool_down(kind, retry_after);
+        retry_after
     }
 
     fn require_authentication(&self) -> Result<(), Error> {
