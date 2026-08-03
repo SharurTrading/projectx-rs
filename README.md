@@ -22,7 +22,7 @@ This README documents the additional safety and lifecycle behavior supplied by t
 
 The minimum supported Rust version is 1.95.0.
 
-Version 1 follows Semantic Versioning. Public API changes that require downstream source changes
+Version 2 follows Semantic Versioning. Public API changes that require downstream source changes
 will be released under a new major version; additive APIs and fixes use minor and patch releases.
 Provider contract changes can still require callers to update operational behavior, so review the
 changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
@@ -30,14 +30,14 @@ changelog before upgrading and keep recovery around ambiguous money-moving outco
 ## Installation
 
 ```sh
-cargo add projectx-client
+cargo add projectx-client@2
 ```
 
 Or add the current major release directly:
 
 ```toml
 [dependencies]
-projectx-client = "1"
+projectx-client = "2"
 ```
 
 The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
@@ -333,6 +333,12 @@ emitted as `RealtimeEvent::Invocation` for exact typed decoding. The SignalR cod
 record-separator framing, messages coalesced with the handshake response, and provider ping/pong
 traffic.
 
+`GatewayQuote` messages are sparse updates rather than guaranteed full snapshots. Accordingly,
+`MarketQuote` keeps the symbol and provider `last_updated` timestamp required while representing
+prices, change, session statistics, volume, and the separate event timestamp as `Option` values.
+Consumers that need a consolidated quote must merge updates by symbol; `None` means unavailable or
+not supplied and must not be replaced with a zero price or volume.
+
 Custom remote endpoints must use HTTPS (and therefore WSS for real-time hubs) so API keys and bearer
 tokens are never sent in plaintext. Plain HTTP/WS is accepted only for exact loopback hosts used by
 local deterministic fixtures, and the builder rejects combining those plaintext fixture endpoints
@@ -380,9 +386,10 @@ credentials; those deployments still require a shared external limiter.
 ## Deliberate live validation
 
 Normal tests are credential-free. One ignored live probe compares the checked-in operation manifest
-with the provider's public Swagger document. A separate credentialed probe authenticates, lists
-active accounts and contracts, validates the market SignalR handshake, and disconnects without
-opening the user hub or invoking an order endpoint.
+with the provider's public Swagger document. Separate credentialed probes dynamically select the
+active MNQ expiry from the available-contract catalog, download recent hourly history, validate the
+market SignalR handshake, and require both a decoded MNQ quote and trade/tick event. They never open
+the user hub or invoke an order endpoint.
 
 To check only the public REST operation set, run:
 
@@ -390,16 +397,28 @@ To check only the public REST operation set, run:
 cargo test --features live-tests --test gateway_surface -- --ignored
 ```
 
-The credentialed probe reads `PROJECTX_USERNAME` and `PROJECTX_API_KEY` from its process environment. Inject
-both values only for the test process through a password manager, CI secret store, or equivalent
-ephemeral secret launcher. Do not place them in an `.env` file, shell startup file, command-line
-argument, or shell history, and unset any manually exported values immediately after the probe.
+The credentialed probes read `PROJECTX_USERNAME` and `PROJECTX_API_KEY` from their process
+environment. Inject both values only for the test process through a password manager, CI secret
+store, or equivalent ephemeral secret launcher. Do not place them in an `.env` file, shell startup
+file, command-line argument, or shell history, and unset any manually exported values immediately
+after the probe.
+
+Set `PROJECTX_LIVE_DATA` to exactly `false` for the simulated/evaluation data subscription or `true`
+for the live data subscription. The selector is required so the probes cannot silently validate a
+different catalog than intended; both values still run against the real ProjectX network. The
+probes select the active MNQ contract dynamically so expiry rollover does not stale the test. Run
+the streaming probe while MNQ is actively trading: no fresh trade event exists during weekends,
+exchange maintenance, holidays, or halts.
 
 When the credentials have been injected deliberately, run:
 
 ```text
-cargo test --features live-tests --test live_read_only -- --ignored
+cargo test --features live-tests --test live_read_only -- --ignored --test-threads=1 --nocapture
 ```
+
+This deliberately runs three serialized, read-only probes: authentication/contract discovery and
+market-hub handshake, recent MNQ history retrieval, and fresh MNQ quote plus trade/tick streaming.
+All three must pass for the live validation gate.
 
 ## License
 

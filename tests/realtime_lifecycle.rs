@@ -326,6 +326,230 @@ fn invocation_decodes_exact_decimal_payload() {
 }
 
 #[test]
+fn invocation_decodes_documented_quote_with_exact_prices() {
+    let invocation = SignalRInvocation::from_json(
+        r#"{
+            "type": 1,
+            "target": "GatewayQuote",
+            "arguments": [
+                "CON.F.US.MNQ.M26",
+                {
+                    "symbol": "F.US.MNQ",
+                    "symbolName": "/MNQ",
+                    "lastPrice": 0.1000000000000000000000000001,
+                    "bestBid": 0.1000000000000000000000000002,
+                    "bestAsk": 0.1000000000000000000000000003,
+                    "change": 1.25,
+                    "changePercent": 0.5,
+                    "open": 21000.25,
+                    "high": 21100.50,
+                    "low": 20900.75,
+                    "volume": 12000,
+                    "lastUpdated": "2026-01-01T00:00:00Z",
+                    "timestamp": "2026-01-01T00:00:00Z"
+                }
+            ]
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    let quote: projectx_client::MarketQuote = invocation
+        .decode()
+        .unwrap_or_else(|error| panic!("fixture market quote must decode: {error}"));
+
+    assert_eq!(quote.raw_symbol.as_str(), "F.US.MNQ");
+    assert_eq!(quote.symbol_name.as_deref(), Some("/MNQ"));
+    assert_eq!(
+        quote
+            .last_price
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("0.1000000000000000000000000001")
+    );
+    assert_eq!(
+        quote.best_bid.as_ref().map(ToString::to_string).as_deref(),
+        Some("0.1000000000000000000000000002")
+    );
+    assert_eq!(
+        quote.best_ask.as_ref().map(ToString::to_string).as_deref(),
+        Some("0.1000000000000000000000000003")
+    );
+    assert_eq!(quote.volume, Some(12000));
+    assert_eq!(
+        quote.timestamp.map(|value| value.to_string()).as_deref(),
+        Some("2026-01-01T00:00:00Z")
+    );
+}
+
+const SPARSE_QUOTE_BATCH_JSON: &str = r#"{
+            "type": 1,
+            "target": "GatewayQuote",
+            "arguments": [
+                "CON.F.US.MNQ.M26",
+                [
+                    null,
+                    {
+                        "symbol": "F.US.MNQ",
+                        "contract": "MNQM6",
+                        "lastPrice": 21000.25,
+                        "bestAsk": 21000.50,
+                        "change": 25.50,
+                        "changePercent": 0.14,
+                        "volume": 12000,
+                        "lastUpdated": "2026-01-01T00:00:00Z",
+                        "timestamp": "2026-01-01T00:00:00Z"
+                    },
+                    {
+                        "symbol": "F.US.MNQ",
+                        "lastPrice": null,
+                        "bestBid": null,
+                        "bestAsk": 21000.50,
+                        "change": null,
+                        "changePercent": null,
+                        "volume": null,
+                        "lastUpdated": "2026-01-01T00:00:01Z",
+                        "timestamp": "2026-01-01T00:00:01Z"
+                    },
+                    {
+                        "symbol": "F.US.MNQ",
+                        "lastPrice": 21000.25,
+                        "bestBid": 21000.00,
+                        "bestAsk": null,
+                        "change": 25.50,
+                        "changePercent": 0.14,
+                        "volume": 12000,
+                        "lastUpdated": "2026-01-01T00:00:02Z",
+                        "timestamp": "2026-01-01T00:00:02Z"
+                    },
+                    {
+                        "symbol": "F.US.MNQ",
+                        "contract": "MNQM6",
+                        "bestBid": 21000.00,
+                        "lastUpdated": "2026-01-01T00:00:03Z",
+                        "timestamp": "2026-01-01T00:00:03Z"
+                    },
+                    null
+                ]
+            ]
+        }"#;
+
+#[test]
+fn invocation_batch_decodes_sparse_quotes_and_omits_null_padding() {
+    let invocation = SignalRInvocation::from_json(SPARSE_QUOTE_BATCH_JSON)
+        .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+        .ok_or(RealtimeError::Protocol("missing invocation"))
+        .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    let decoded = invocation.decode_batch::<projectx_client::MarketQuote>();
+    let [missing_bid, null_bid, null_ask, missing_ask] = decoded.as_slice() else {
+        panic!("fixture must omit null padding and produce exactly four quotes");
+    };
+    let missing_bid = missing_bid
+        .as_ref()
+        .unwrap_or_else(|error| panic!("missing-bid quote must decode: {error}"));
+    let null_bid = null_bid
+        .as_ref()
+        .unwrap_or_else(|error| panic!("null-bid quote must decode: {error}"));
+    let null_ask = null_ask
+        .as_ref()
+        .unwrap_or_else(|error| panic!("null-ask quote must decode: {error}"));
+    let missing_ask = missing_ask
+        .as_ref()
+        .unwrap_or_else(|error| panic!("missing-ask quote must decode: {error}"));
+
+    assert!(missing_bid.best_bid.is_none());
+    assert_eq!(
+        missing_bid
+            .best_ask
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("21000.50")
+    );
+    assert!(null_bid.best_bid.is_none());
+    assert_eq!(
+        null_bid
+            .best_ask
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("21000.50")
+    );
+    assert!(null_bid.last_price.is_none());
+    assert!(null_bid.change.is_none());
+    assert!(null_bid.change_percent.is_none());
+    assert!(null_bid.volume.is_none());
+    assert_eq!(
+        null_ask
+            .best_bid
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("21000.00")
+    );
+    assert!(null_ask.best_ask.is_none());
+    assert_eq!(
+        missing_ask
+            .best_bid
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("21000.00")
+    );
+    assert!(missing_ask.best_ask.is_none());
+    assert!(missing_ask.last_price.is_none());
+    assert!(missing_ask.change.is_none());
+    assert!(missing_ask.change_percent.is_none());
+    assert!(missing_ask.open.is_none());
+    assert!(missing_ask.high.is_none());
+    assert!(missing_ask.low.is_none());
+    assert!(missing_ask.volume.is_none());
+}
+
+#[test]
+fn invocation_decodes_sparse_quote_without_event_timestamp() {
+    let invocation = SignalRInvocation::from_json(
+        r#"{
+            "type": 1,
+            "target": "GatewayQuote",
+            "arguments": [
+                "CON.F.US.MNQ.M26",
+                {
+                    "symbol": "F.US.MNQ",
+                    "contract": "MNQM6",
+                    "open": 21000.25,
+                    "high": 21100.50,
+                    "low": 20900.75,
+                    "lastUpdated": "2026-01-01T00:00:04Z"
+                }
+            ]
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("fixture JSON must decode: {error}"))
+    .ok_or(RealtimeError::Protocol("missing invocation"))
+    .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
+    let quote: projectx_client::MarketQuote = invocation
+        .decode()
+        .unwrap_or_else(|error| panic!("sparse OHLC quote must decode: {error}"));
+
+    assert!(quote.timestamp.is_none());
+    assert_eq!(quote.last_updated.to_string(), "2026-01-01T00:00:04Z");
+    assert_eq!(
+        quote.open.as_ref().map(ToString::to_string).as_deref(),
+        Some("21000.25")
+    );
+    assert_eq!(
+        quote.high.as_ref().map(ToString::to_string).as_deref(),
+        Some("21100.50")
+    );
+    assert_eq!(
+        quote.low.as_ref().map(ToString::to_string).as_deref(),
+        Some("20900.75")
+    );
+}
+
+#[test]
 fn invocation_batch_decodes_exact_entries_independently() {
     let invocation = SignalRInvocation::from_json(
         r#"{

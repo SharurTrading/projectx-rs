@@ -10,7 +10,7 @@ first public release.
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-08-03
+## [2.0.0] - 2026-08-03
 
 ### Added
 
@@ -20,11 +20,18 @@ first public release.
 - Add a validated, fully redacted `ApplicationCredentials` builder and a validated `TradeQuery`
   builder for the new authorized-app and optional-range request contracts.
 - Add a deterministic REST-operation manifest and an ignored public Swagger drift check.
+- Add ignored, credentialed live probes that explicitly select a ProjectX data catalog, dynamically
+  discover its active MNQ expiry, download recent history, and validate decoded quote and trade/tick
+  streams.
 - Add deterministic boundary tests proving the history and general limiters admit all 50 and 200
   allowed requests before throttling, including across cloned clients.
 
 ### Changed
 
+- Represent `MarketQuote` prices, change values, session statistics, volume, and its separate event
+  timestamp as optional because the live hub emits sparse quote updates that omit unchanged values;
+  decoding accepts both missing and null optional fields. This is a source-breaking correction that
+  avoids fabricating zero values.
 - Fence logout against token revisions so cancelled or ambiguous attempts invalidate only the
   submitted session, while definitive pre-send failures and provider throttling retain it.
 
@@ -74,7 +81,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v1.1.0
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v2.0.0
 [1.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SharurTrading/projectx-rs/releases/tag/v1.0.0
