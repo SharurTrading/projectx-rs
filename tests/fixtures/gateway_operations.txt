@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Kevin Monaghan
+# SPDX-License-Identifier: MIT
+
+GET /api/Status/ping
+POST /api/Account/search
+POST /api/Auth/loginApp
+POST /api/Auth/loginKey
+POST /api/Auth/logout
+POST /api/Auth/validate
+POST /api/Contract/available
+POST /api/Contract/search
+POST /api/Contract/searchById
+POST /api/History/retrieveBars
+POST /api/Order/cancel
+POST /api/Order/modify
+POST /api/Order/place
+POST /api/Order/search
+POST /api/Order/searchById
+POST /api/Order/searchOpen
+POST /api/Order/v2/query
+POST /api/Position/closeContract
+POST /api/Position/partialCloseContract
+POST /api/Position/searchOpen
+POST /api/Trade/search

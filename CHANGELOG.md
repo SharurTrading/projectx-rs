@@ -10,6 +10,24 @@ first public release.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-03
+
+### Added
+
+- Cover every operation in the current ProjectX Gateway Swagger document, including authorized-app
+  login, logout, status ping, general account search, order lookup by ID, and trade search with
+  independently optional time bounds.
+- Add a validated, fully redacted `ApplicationCredentials` builder and a validated `TradeQuery`
+  builder for the new authorized-app and optional-range request contracts.
+- Add a deterministic REST-operation manifest and an ignored public Swagger drift check.
+- Add deterministic boundary tests proving the history and general limiters admit all 50 and 200
+  allowed requests before throttling, including across cloned clients.
+
+### Changed
+
+- Fence logout against token revisions so cancelled or ambiguous attempts invalidate only the
+  submitted session, while definitive pre-send failures and provider throttling retain it.
+
 ## [1.0.1] - 2026-08-02
 
 ### Fixed
@@ -56,6 +74,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SharurTrading/projectx-rs/releases/tag/v1.0.0

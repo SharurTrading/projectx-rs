@@ -353,17 +353,36 @@ mod tests {
         assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
     }
 
-    #[test]
-    fn exact_request_boundary_is_admitted_once() {
+    #[tokio::test(start_paused = true)]
+    async fn default_history_budget_reaches_its_limit_before_throttling() {
         let limits = Arc::new(RateLimits::new(Some(RateLimitConfig::default())));
-        for _ in 0..50 {
-            assert_eq!(limits.try_acquire(RateLimitKind::History), Ok(()));
+        for request_number in 1..=50 {
+            assert_eq!(
+                limits.try_acquire(RateLimitKind::History),
+                Ok(()),
+                "history request {request_number} must be admitted"
+            );
         }
-        assert!(limits.try_acquire(RateLimitKind::History).is_err());
-        for _ in 0..200 {
-            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::History),
+            Err(Duration::from_secs(30))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_general_budget_reaches_its_limit_before_throttling() {
+        let limits = Arc::new(RateLimits::new(Some(RateLimitConfig::default())));
+        for request_number in 1..=200 {
+            assert_eq!(
+                limits.try_acquire(RateLimitKind::General),
+                Ok(()),
+                "general request {request_number} must be admitted"
+            );
         }
-        assert!(limits.try_acquire(RateLimitKind::General).is_err());
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_mins(1))
+        );
     }
 
     #[tokio::test(start_paused = true)]

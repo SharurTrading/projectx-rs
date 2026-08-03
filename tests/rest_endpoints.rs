@@ -8,7 +8,7 @@ use projectx_client::{
     AccountId, BarUnit, Bracket, CancelOrder, Client, CloseContract, ContractId, Credentials,
     Decimal, Endpoints, HistoryRequest, ModifyOrder, OrderId, OrderQuery, OrderSearch, OrderSortBy,
     OrderSortDirection, OrderStatus, OrderType, PartialCloseContract, PlaceOrder, SearchContracts,
-    Side, Timestamp, TradeSearch,
+    Side, Timestamp, TradeQuery, TradeSearch,
 };
 use serde_json::json;
 
@@ -117,6 +117,7 @@ async fn order_endpoints_use_typed_exact_requests() {
     let _: projectx_client::Order = serde_json::from_value(order_json())
         .unwrap_or_else(|error| panic!("fixture order must decode: {error}"));
     let search = order_search_mock(&server).await;
+    let by_id = order_by_id_mock(&server).await;
     let open = open_order_mock(&server).await;
     let place = place_order_mock(&server).await;
     let cancel = operation_mock(
@@ -145,6 +146,10 @@ async fn order_endpoints_use_typed_exact_requests() {
         )
         .await
         .unwrap_or_else(|error| panic!("order search must succeed: {error:?}"));
+    let order = client
+        .order_by_id(account_id(), order_id())
+        .await
+        .unwrap_or_else(|error| panic!("order lookup must succeed: {error}"));
     let open_orders = client
         .search_open_orders(account_id())
         .await
@@ -180,11 +185,13 @@ async fn order_endpoints_use_typed_exact_requests() {
         .unwrap_or_else(|error| panic!("order modification must succeed: {error}"));
 
     search.assert_async().await;
+    by_id.assert_async().await;
     open.assert_async().await;
     place.assert_async().await;
     cancel.assert_async().await;
     modify.assert_async().await;
     assert_eq!(orders, open_orders);
+    assert_eq!(order, orders[0]);
     assert_eq!(orders[0].status, OrderStatus::Open);
     assert_eq!(orders[0].trail_distance, Some(8));
     assert_eq!(orders[0].trail_price, Some(Decimal::new(10_025, 2)));
@@ -251,6 +258,8 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
     )
     .await;
     let trades = trade_search_mock(&server).await;
+    let all_trades = all_trades_query_mock(&server).await;
+    let ending_trades = ending_trades_query_mock(&server).await;
 
     let client = authenticated_client(&server).await;
     let open_positions = client
@@ -277,11 +286,28 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
         )
         .await
         .unwrap_or_else(|error| panic!("trade search must succeed: {error}"));
+    let all_query = TradeQuery::builder(account_id())
+        .build()
+        .unwrap_or_else(|error| panic!("unbounded trade query must be valid: {error}"));
+    let all_executions = client
+        .query_trades(&all_query)
+        .await
+        .unwrap_or_else(|error| panic!("unbounded trade query must succeed: {error}"));
+    let ending_query = TradeQuery::builder(account_id())
+        .end_timestamp(timestamp("2026-01-02T00:00:00Z"))
+        .build()
+        .unwrap_or_else(|error| panic!("end-only trade query must be valid: {error}"));
+    let ending_executions = client
+        .query_trades(&ending_query)
+        .await
+        .unwrap_or_else(|error| panic!("end-only trade query must succeed: {error}"));
 
     positions.assert_async().await;
     close.assert_async().await;
     partial.assert_async().await;
     trades.assert_async().await;
+    all_trades.assert_async().await;
+    ending_trades.assert_async().await;
     assert_eq!(open_positions[0].average_price, Decimal::new(10_000, 2));
     assert_eq!(
         open_positions[0].contract_display_name.as_deref(),
@@ -289,6 +315,8 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
     );
     assert_eq!(executions[0].fees, Decimal::new(140, 2));
     assert_eq!(executions[0].commissions, Some(Decimal::new(45, 2)));
+    assert_eq!(all_executions, executions);
+    assert_eq!(ending_executions, executions);
 }
 
 fn contract_json() -> serde_json::Value {
@@ -419,6 +447,21 @@ async fn open_order_mock(server: &MockServer) -> Mock<'_> {
                 .json_body(json!({"accountId": 42}));
             then.status(200)
                 .json_body(json!({"orders": [order_json()], "success": true, "errorCode": 0}));
+        })
+        .await
+}
+
+async fn order_by_id_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Order/searchById")
+                .json_body(json!({"accountId": 42, "orderId": 84}));
+            then.status(200).json_body(json!({
+                "order": order_json(),
+                "success": true,
+                "errorCode": 0
+            }));
         })
         .await
 }
@@ -555,4 +598,54 @@ async fn trade_search_mock(server: &MockServer) -> Mock<'_> {
             }));
         })
         .await
+}
+
+async fn all_trades_query_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Trade/search")
+                .json_body(json!({"accountId": 42}));
+            then.status(200).json_body(json!({
+                "trades": [trade_json()],
+                "success": true,
+                "errorCode": 0
+            }));
+        })
+        .await
+}
+
+async fn ending_trades_query_mock(server: &MockServer) -> Mock<'_> {
+    server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api/Trade/search")
+                .json_body(json!({
+                    "accountId": 42,
+                    "endTimestamp": "2026-01-02T00:00:00Z"
+                }));
+            then.status(200).json_body(json!({
+                "trades": [trade_json()],
+                "success": true,
+                "errorCode": 0
+            }));
+        })
+        .await
+}
+
+fn trade_json() -> serde_json::Value {
+    json!({
+        "id": 63,
+        "accountId": 42,
+        "contractId": "CON.F.US.MNQ.M26",
+        "creationTimestamp": "2026-01-01T00:00:01Z",
+        "price": 100.25,
+        "profitAndLoss": 5.00,
+        "fees": 1.40,
+        "commissions": 0.45,
+        "side": 1,
+        "size": 1,
+        "voided": false,
+        "orderId": 84
+    })
 }
