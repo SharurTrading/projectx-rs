@@ -33,7 +33,7 @@ pub enum Error {
         /// Public-safe reason for rejection.
         reason: &'static str,
     },
-    /// The provider rejected the supplied API-key credentials.
+    /// The provider rejected the supplied authentication credentials.
     #[error("provider rejected the credentials (code: {code})")]
     CredentialsRejected {
         /// Public provider rejection code.
@@ -78,6 +78,9 @@ pub enum Error {
         /// Numeric HTTP status code.
         status: u16,
     },
+    /// The provider status endpoint returned a body other than `pong`.
+    #[error("provider status endpoint returned an unexpected response")]
+    UnexpectedStatusResponse,
     /// A request was not sent because the shared local budget was exhausted.
     #[error("local {kind} rate limit is exhausted; retry after {retry_after:?}")]
     LocallyRateLimited {

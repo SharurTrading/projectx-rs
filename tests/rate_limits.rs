@@ -58,6 +58,23 @@ fn place_order() -> PlaceOrder {
         .unwrap_or_else(|error| panic!("fixture order must be valid: {error}"))
 }
 
+fn history_request() -> HistoryRequest {
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    HistoryRequest::builder(
+        contract_id,
+        false,
+        Timestamp::new("2026-01-01T00:00:00Z")
+            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
+        Timestamp::new("2026-01-01T01:00:00Z")
+            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
+        BarUnit::Minute,
+    )
+    .limit(60)
+    .build()
+    .unwrap_or_else(|error| panic!("fixture history request must be valid: {error}"))
+}
+
 #[tokio::test]
 async fn cloned_clients_share_capacity_and_local_mutation_rejection_sends_nothing() {
     let server = MockServer::start_async().await;
@@ -99,6 +116,64 @@ async fn cloned_clients_share_capacity_and_local_mutation_rejection_sends_nothin
 }
 
 #[tokio::test]
+async fn cloned_clients_reach_nontrivial_general_and_history_limits() {
+    let server = MockServer::start_async().await;
+    let accounts = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Account/search");
+            then.status(200)
+                .json_body(json!({"accounts": [], "success": true, "errorCode": 0}));
+        })
+        .await;
+    let history = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/History/retrieveBars");
+            then.status(200)
+                .json_body(json!({"bars": [], "success": true, "errorCode": 0}));
+        })
+        .await;
+    let placement = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/place");
+            then.status(200)
+                .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
+        })
+        .await;
+    let window = Duration::from_mins(1);
+    let client = fixture_client(&server, limits(3, window), 0);
+    authenticate(&client, &server).await;
+    let clients = [client.clone(), client.clone(), client.clone()];
+    let request = history_request();
+
+    for client_clone in &clients {
+        client_clone
+            .search_active_accounts()
+            .await
+            .unwrap_or_else(|error| panic!("every allowed general request must succeed: {error}"));
+    }
+    for client_clone in &clients {
+        client_clone
+            .retrieve_bars(&request)
+            .await
+            .unwrap_or_else(|error| panic!("every allowed history request must succeed: {error}"));
+    }
+    let Err(error) = client.place_order(&place_order()).await else {
+        panic!("the fourth general request must be rejected locally");
+    };
+
+    assert!(matches!(
+        error,
+        Error::LocallyRateLimited {
+            kind: RateLimitKind::General,
+            retry_after
+        } if retry_after <= window && !retry_after.is_zero()
+    ));
+    accounts.assert_calls_async(3).await;
+    history.assert_calls_async(3).await;
+    placement.assert_calls_async(0).await;
+}
+
+#[tokio::test]
 async fn retrieve_bars_uses_a_budget_independent_from_general_queries() {
     let server = MockServer::start_async().await;
     let accounts = server
@@ -122,22 +197,9 @@ async fn retrieve_bars_uses_a_budget_independent_from_general_queries() {
         .search_active_accounts()
         .await
         .unwrap_or_else(|error| panic!("general query must succeed: {error}"));
-    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
-        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
-    let history_request = HistoryRequest::builder(
-        contract_id,
-        false,
-        Timestamp::new("2026-01-01T00:00:00Z")
-            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
-        Timestamp::new("2026-01-01T01:00:00Z")
-            .unwrap_or_else(|error| panic!("fixture timestamp must be valid: {error}")),
-        BarUnit::Minute,
-    )
-    .limit(60)
-    .build()
-    .unwrap_or_else(|error| panic!("fixture history request must be valid: {error}"));
+    let request = history_request();
     client
-        .retrieve_bars(&history_request)
+        .retrieve_bars(&request)
         .await
         .unwrap_or_else(|error| panic!("history query must use its own budget: {error}"));
 

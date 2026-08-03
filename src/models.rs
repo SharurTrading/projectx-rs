@@ -701,7 +701,7 @@ impl OrderSearch {
         start_timestamp: Timestamp,
         end_timestamp: Option<Timestamp>,
     ) -> Result<Self, RequestValidationError> {
-        validate_search_range(start_timestamp, end_timestamp)?;
+        validate_search_range(Some(start_timestamp), end_timestamp)?;
         Ok(Self {
             account_id,
             start_timestamp,
@@ -1628,6 +1628,90 @@ pub struct TradeSearch {
     end_timestamp: Option<Timestamp>,
 }
 
+/// Trade search parameters with independently optional timestamp bounds.
+///
+/// Construct this request with [`TradeQuery::builder`]. Omitting both bounds
+/// requests every trade available for the selected account.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeQuery {
+    /// Provider account.
+    account_id: AccountId,
+    /// Optional absolute range start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_timestamp: Option<Timestamp>,
+    /// Optional absolute range end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_timestamp: Option<Timestamp>,
+}
+
+impl TradeQuery {
+    /// Starts a trade query for an account with no timestamp bounds.
+    pub const fn builder(account_id: AccountId) -> TradeQueryBuilder {
+        TradeQueryBuilder {
+            account_id,
+            start_timestamp: None,
+            end_timestamp: None,
+        }
+    }
+
+    /// Returns the provider account.
+    #[must_use]
+    pub const fn account_id(&self) -> AccountId {
+        self.account_id
+    }
+
+    /// Returns the optional lower timestamp bound.
+    #[must_use]
+    pub const fn start_timestamp(&self) -> Option<Timestamp> {
+        self.start_timestamp
+    }
+
+    /// Returns the optional upper timestamp bound.
+    #[must_use]
+    pub const fn end_timestamp(&self) -> Option<Timestamp> {
+        self.end_timestamp
+    }
+}
+
+/// Builder for a validated [`TradeQuery`].
+#[derive(Clone, Copy, Debug)]
+#[must_use = "a TradeQueryBuilder does nothing until build is called"]
+pub struct TradeQueryBuilder {
+    account_id: AccountId,
+    start_timestamp: Option<Timestamp>,
+    end_timestamp: Option<Timestamp>,
+}
+
+impl TradeQueryBuilder {
+    /// Sets the optional lower timestamp bound.
+    pub const fn start_timestamp(mut self, start_timestamp: Timestamp) -> Self {
+        self.start_timestamp = Some(start_timestamp);
+        self
+    }
+
+    /// Sets the optional upper timestamp bound.
+    pub const fn end_timestamp(mut self, end_timestamp: Timestamp) -> Self {
+        self.end_timestamp = Some(end_timestamp);
+        self
+    }
+
+    /// Validates and builds the trade query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestValidationError::SearchRangeNotIncreasing`] when both
+    /// bounds are present and the end is not later than the start.
+    pub fn build(self) -> Result<TradeQuery, RequestValidationError> {
+        validate_search_range(self.start_timestamp, self.end_timestamp)?;
+        Ok(TradeQuery {
+            account_id: self.account_id,
+            start_timestamp: self.start_timestamp,
+            end_timestamp: self.end_timestamp,
+        })
+    }
+}
+
 impl TradeSearch {
     /// Creates a validated execution search.
     ///
@@ -1640,7 +1724,7 @@ impl TradeSearch {
         start_timestamp: Timestamp,
         end_timestamp: Option<Timestamp>,
     ) -> Result<Self, RequestValidationError> {
-        validate_search_range(start_timestamp, end_timestamp)?;
+        validate_search_range(Some(start_timestamp), end_timestamp)?;
         Ok(Self {
             account_id,
             start_timestamp,
@@ -1668,10 +1752,13 @@ impl TradeSearch {
 }
 
 fn validate_search_range(
-    start_timestamp: Timestamp,
+    start_timestamp: Option<Timestamp>,
     end_timestamp: Option<Timestamp>,
 ) -> Result<(), RequestValidationError> {
-    if end_timestamp.is_some_and(|end| end <= start_timestamp) {
+    if start_timestamp
+        .zip(end_timestamp)
+        .is_some_and(|(start, end)| end <= start)
+    {
         Err(RequestValidationError::SearchRangeNotIncreasing)
     } else {
         Ok(())
@@ -1713,7 +1800,11 @@ pub struct Trade {
     pub order_id: OrderId,
 }
 
-/// Consolidated quote from the market hub.
+/// Sparse quote update from the market hub.
+///
+/// The provider may send only the fields that changed. Callers that need a
+/// consolidated snapshot must merge updates by symbol and preserve `None` as
+/// unavailable data rather than substituting a zero price or volume.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[non_exhaustive]
 #[serde(rename_all = "camelCase")]
@@ -1724,36 +1815,38 @@ pub struct MarketQuote {
     /// Human-readable symbol name, when supplied.
     #[serde(default)]
     pub symbol_name: Option<String>,
-    /// Last trade price.
-    #[serde(with = "crate::decimal_serde")]
-    pub last_price: Decimal,
-    /// Best bid price.
-    #[serde(with = "crate::decimal_serde")]
-    pub best_bid: Decimal,
-    /// Best ask price.
-    #[serde(with = "crate::decimal_serde")]
-    pub best_ask: Decimal,
-    /// Session price change.
-    #[serde(with = "crate::decimal_serde")]
-    pub change: Decimal,
-    /// Session percent change.
-    #[serde(with = "crate::decimal_serde")]
-    pub change_percent: Decimal,
-    /// Session open.
+    /// Last trade price, when supplied by this update.
+    #[serde(default, with = "crate::decimal_serde::option")]
+    pub last_price: Option<Decimal>,
+    /// Best bid price, when supplied by this update.
+    #[serde(default, with = "crate::decimal_serde::option")]
+    pub best_bid: Option<Decimal>,
+    /// Best ask price, when supplied by this update.
+    #[serde(default, with = "crate::decimal_serde::option")]
+    pub best_ask: Option<Decimal>,
+    /// Session price change, when supplied by this update.
+    #[serde(default, with = "crate::decimal_serde::option")]
+    pub change: Option<Decimal>,
+    /// Session percent change, when supplied by this update.
+    #[serde(default, with = "crate::decimal_serde::option")]
+    pub change_percent: Option<Decimal>,
+    /// Session open, when supplied by this update.
     #[serde(default, with = "crate::decimal_serde::option")]
     pub open: Option<Decimal>,
-    /// Session high.
+    /// Session high, when supplied by this update.
     #[serde(default, with = "crate::decimal_serde::option")]
     pub high: Option<Decimal>,
-    /// Session low.
+    /// Session low, when supplied by this update.
     #[serde(default, with = "crate::decimal_serde::option")]
     pub low: Option<Decimal>,
-    /// Session cumulative volume.
-    pub volume: i64,
+    /// Session cumulative volume, when supplied by this update.
+    #[serde(default)]
+    pub volume: Option<i64>,
     /// Provider last-updated timestamp.
     pub last_updated: Timestamp,
-    /// Event timestamp.
-    pub timestamp: Timestamp,
+    /// Event timestamp, when supplied separately from [`Self::last_updated`].
+    #[serde(default)]
+    pub timestamp: Option<Timestamp>,
 }
 
 /// Depth-of-market update from the market hub.
@@ -1883,6 +1976,11 @@ pub(crate) struct BarsBody {
 pub(crate) struct OrdersBody {
     #[serde(default, deserialize_with = "null_to_empty")]
     pub(crate) orders: Vec<Order>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OrderBody {
+    pub(crate) order: Order,
 }
 
 #[derive(Debug, Deserialize)]

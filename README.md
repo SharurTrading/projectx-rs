@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?release=1.0.1)](https://crates.io/crates/projectx-client/1.0.1)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/1.0.1?release=1.0.1)](https://docs.rs/projectx-client/1.0.1/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?release=2.0.0)](https://crates.io/crates/projectx-client/2.0.0)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/2.0.0?release=2.0.0)](https://docs.rs/projectx-client/2.0.0/projectx_client/)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -22,7 +22,7 @@ This README documents the additional safety and lifecycle behavior supplied by t
 
 The minimum supported Rust version is 1.95.0.
 
-Version 1 follows Semantic Versioning. Public API changes that require downstream source changes
+Version 2 follows Semantic Versioning. Public API changes that require downstream source changes
 will be released under a new major version; additive APIs and fixes use minor and patch releases.
 Provider contract changes can still require callers to update operational behavior, so review the
 changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
@@ -30,14 +30,14 @@ changelog before upgrading and keep recovery around ambiguous money-moving outco
 ## Installation
 
 ```sh
-cargo add projectx-client
+cargo add projectx-client@2
 ```
 
 Or add the current major release directly:
 
 ```toml
 [dependencies]
-projectx-client = "1"
+projectx-client = "2"
 ```
 
 The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
@@ -82,24 +82,24 @@ tokens. See [SECURITY.md](SECURITY.md).
 
 ## Feature coverage
 
-The current client surface covers the provider workflows needed for authentication, discovery,
-market data, and execution:
+The current client surface covers every REST operation in the provider's published Gateway
+Swagger document:
 
-- API-key login and rotating-token validation
-- active-account discovery
+- API-key and authorized-application login, logout, status ping, and rotating-token validation
+- active-only and general account discovery
 - contract availability, text search, and lookup by ID
 - historical bars
-- historical and paginated v2 order search, placement, cancellation, and modification
+- historical, open, by-ID, and paginated v2 order search, placement, cancellation, and modification
 - open positions, full close, and partial close
-- execution/trade search
+- bounded and unbounded execution/trade search
 
 It also implements both documented SignalR hubs, market/user subscription helpers,
 bounded event delivery, reconnect notification, and exact provider payload models.
 
 Requests with provider invariants are constructed through validated APIs. In particular,
-`HistoryRequest::builder`, `OrderQuery::builder`, `PlaceOrder::builder`, `ModifyOrder::builder`,
-`Bracket::new`, and `PartialCloseContract::new` reject invalid ranges, counts, status codes, or empty
-mutations before any network request can be admitted.
+`HistoryRequest::builder`, `OrderQuery::builder`, `TradeQuery::builder`, `PlaceOrder::builder`,
+`ModifyOrder::builder`, `Bracket::new`, and `PartialCloseContract::new` reject invalid ranges,
+counts, status codes, or empty mutations before any network request can be admitted.
 
 `OrderType::StopLimit` is retained when decoding provider responses, but the current ProjectX order
 placement and bracket references do not document type code `3` as a supported request value.
@@ -126,8 +126,11 @@ provider snapshot to translate at the consuming application's boundary.
 
 ### Session validation and token rotation
 
-`authenticate()` performs API-key login and stores the bearer token privately. Applications that
-run for more than a short request cycle can instead use `authenticate_with_validation(period)`:
+`authenticate()` uses the credential type supplied to the client and stores the bearer token
+privately. `Client::builder(Credentials)` selects API-key login. Authorized applications can use
+`Client::application_builder(ApplicationCredentials)` to send the provider's five-field
+application-login contract. Applications that run for more than a short request cycle can instead
+use `authenticate_with_validation(period)`:
 
 ```rust
 use std::time::Duration;
@@ -170,6 +173,9 @@ Direct `validate_session()` calls follow the same rule. Cancellation, a timeout 
 an untrustworthy success/error-code pair, an oversized or malformed response, or an unusable rotated
 token all fail closed because the provider may already have replaced the old bearer. Definitive
 pre-send connection failures and HTTP 429 retain the current revision and remain safely retryable.
+`logout()` similarly invalidates only the exact session revision submitted to the provider; an
+ambiguous logout cannot erase a newer concurrent authentication, while a definitive pre-send
+failure or HTTP 429 retains the existing session.
 
 ### Automatic reconnect and subscription replay
 
@@ -327,6 +333,12 @@ emitted as `RealtimeEvent::Invocation` for exact typed decoding. The SignalR cod
 record-separator framing, messages coalesced with the handshake response, and provider ping/pong
 traffic.
 
+`GatewayQuote` messages are sparse updates rather than guaranteed full snapshots. Accordingly,
+`MarketQuote` keeps the symbol and provider `last_updated` timestamp required while representing
+prices, change, session statistics, volume, and the separate event timestamp as `Option` values.
+Consumers that need a consolidated quote must merge updates by symbol; `None` means unavailable or
+not supplied and must not be replaced with a zero price or volume.
+
 Custom remote endpoints must use HTTPS (and therefore WSS for real-time hubs) so API keys and bearer
 tokens are never sent in plaintext. Plain HTTP/WS is accepted only for exact loopback hosts used by
 local deterministic fixtures, and the builder rejects combining those plaintext fixture endpoints
@@ -349,8 +361,8 @@ Local rate limiting is enabled by default and follows the documented
 | Every other authenticated REST endpoint | 200 requests per 60 seconds |
 
 The history and general budgets are independent and shared by a `Client` and all of its clones.
-Every actual request attempt consumes capacity, including a retry. API-key login is not counted
-because it is not an authenticated request.
+Every actual request attempt consumes capacity, including a retry. Login and status ping are not
+counted because they are not authenticated requests.
 
 Safe query methods wait asynchronously for capacity without blocking a runtime thread. Rate-limit
 waiting happens before the configured HTTP request timeout starts; wrap the complete method future
@@ -373,20 +385,40 @@ credentials; those deployments still require a shared external limiter.
 
 ## Deliberate live validation
 
-Normal tests are credential-free. The ignored live probe authenticates, lists
-active accounts and contracts, validates the market SignalR handshake, and
-disconnects without opening the user hub or invoking an order endpoint.
+Normal tests are credential-free. One ignored live probe compares the checked-in operation manifest
+with the provider's public Swagger document. Separate credentialed probes dynamically select the
+active MNQ expiry from the available-contract catalog, download recent hourly history, validate the
+market SignalR handshake, and require both a decoded MNQ quote and trade/tick event. They never open
+the user hub or invoke an order endpoint.
 
-The probe reads `PROJECTX_USERNAME` and `PROJECTX_API_KEY` from its process environment. Inject
-both values only for the test process through a password manager, CI secret store, or equivalent
-ephemeral secret launcher. Do not place them in an `.env` file, shell startup file, command-line
-argument, or shell history, and unset any manually exported values immediately after the probe.
+To check only the public REST operation set, run:
+
+```text
+cargo test --features live-tests --test gateway_surface -- --ignored
+```
+
+The credentialed probes read `PROJECTX_USERNAME` and `PROJECTX_API_KEY` from their process
+environment. Inject both values only for the test process through a password manager, CI secret
+store, or equivalent ephemeral secret launcher. Do not place them in an `.env` file, shell startup
+file, command-line argument, or shell history, and unset any manually exported values immediately
+after the probe.
+
+Set `PROJECTX_LIVE_DATA` to exactly `false` for the simulated/evaluation data subscription or `true`
+for the live data subscription. The selector is required so the probes cannot silently validate a
+different catalog than intended; both values still run against the real ProjectX network. The
+probes select the active MNQ contract dynamically so expiry rollover does not stale the test. Run
+the streaming probe while MNQ is actively trading: no fresh trade event exists during weekends,
+exchange maintenance, holidays, or halts.
 
 When the credentials have been injected deliberately, run:
 
 ```text
-cargo test --features live-tests --test live_read_only -- --ignored
+cargo test --features live-tests --test live_read_only -- --ignored --test-threads=1 --nocapture
 ```
+
+This deliberately runs three serialized, read-only probes: authentication/contract discovery and
+market-hub handshake, recent MNQ history retrieval, and fresh MNQ quote plus trade/tick streaming.
+All three must pass for the live validation gate.
 
 ## License
 

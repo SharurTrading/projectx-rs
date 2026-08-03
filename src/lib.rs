@@ -41,7 +41,7 @@ mod token;
 
 pub use client::{Client, ClientBuilder, SessionValidator};
 pub use config::Endpoints;
-pub use credentials::Credentials;
+pub use credentials::{ApplicationCredentials, ApplicationCredentialsBuilder, Credentials};
 pub use error::{Error, ProviderError};
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 pub use models::{
@@ -50,7 +50,8 @@ pub use models::{
     ModifyOrderBuilder, OperationResponse, Order, OrderPage, OrderQuery, OrderQueryBuilder,
     OrderResponse, OrderSearch, OrderSortBy, OrderSortDirection, OrderStatus, OrderType,
     PartialCloseContract, PlaceOrder, PlaceOrderBuilder, Position, PositionType,
-    RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeSearch,
+    RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeQuery,
+    TradeQueryBuilder, TradeSearch,
 };
 pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
 pub use realtime::{

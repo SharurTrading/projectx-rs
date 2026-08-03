@@ -6,7 +6,7 @@
 use projectx_client::{
     AccountId, Bar, BarUnit, ContractId, Decimal, HistoryRequest, Order, OrderId, OrderQuery,
     OrderSearch, OrderSortBy, OrderSortDirection, OrderStatus, Position, PositionId,
-    RequestValidationError, SymbolId, Timestamp, Trade, TradeId, TradeSearch,
+    RequestValidationError, SymbolId, Timestamp, Trade, TradeId, TradeQuery, TradeSearch,
 };
 use serde_json::json;
 
@@ -69,6 +69,13 @@ fn history_and_search_ranges_must_increase() {
             TradeSearch::new(account_id(), start, Some(end)),
             Err(RequestValidationError::SearchRangeNotIncreasing)
         );
+        assert_eq!(
+            TradeQuery::builder(account_id())
+                .start_timestamp(start)
+                .end_timestamp(end)
+                .build(),
+            Err(RequestValidationError::SearchRangeNotIncreasing)
+        );
     }
 
     let history = HistoryRequest::builder(
@@ -84,6 +91,51 @@ fn history_and_search_ranges_must_increase() {
         .unwrap_or_else(|error| panic!("history request must serialize: {error}"));
     assert_eq!(history_json["startTime"], json!("2026-01-01T00:00:00Z"));
     assert_eq!(history_json["endTime"], json!("2026-01-02T00:00:00Z"));
+}
+
+#[test]
+fn trade_query_serializes_independently_optional_bounds() {
+    let unbounded = TradeQuery::builder(account_id())
+        .build()
+        .unwrap_or_else(|error| panic!("unbounded trade query must build: {error}"));
+    assert_eq!(
+        serde_json::to_value(unbounded)
+            .unwrap_or_else(|error| panic!("trade query must serialize: {error}")),
+        json!({"accountId": 42})
+    );
+
+    let start = timestamp("2026-01-01T00:00:00Z");
+    let start_only = TradeQuery::builder(account_id())
+        .start_timestamp(start)
+        .build()
+        .unwrap_or_else(|error| panic!("start-only trade query must build: {error}"));
+    assert_eq!(start_only.account_id(), account_id());
+    assert_eq!(start_only.start_timestamp(), Some(start));
+    assert_eq!(start_only.end_timestamp(), None);
+    assert_eq!(
+        serde_json::to_value(start_only)
+            .unwrap_or_else(|error| panic!("trade query must serialize: {error}")),
+        json!({
+            "accountId": 42,
+            "startTimestamp": "2026-01-01T00:00:00Z"
+        })
+    );
+
+    let end = timestamp("2026-01-02T00:00:00Z");
+    let end_only = TradeQuery::builder(account_id())
+        .end_timestamp(end)
+        .build()
+        .unwrap_or_else(|error| panic!("end-only trade query must build: {error}"));
+    assert_eq!(end_only.start_timestamp(), None);
+    assert_eq!(end_only.end_timestamp(), Some(end));
+    assert_eq!(
+        serde_json::to_value(end_only)
+            .unwrap_or_else(|error| panic!("trade query must serialize: {error}")),
+        json!({
+            "accountId": 42,
+            "endTimestamp": "2026-01-02T00:00:00Z"
+        })
+    );
 }
 
 #[test]

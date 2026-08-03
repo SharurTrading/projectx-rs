@@ -37,10 +37,11 @@ domain translation.
   outcome invalidates only its exact revision, and only a definitive pre-send failure or HTTP 429 may
   retain that basis. Dropping or shutting down the periodic validator synchronously closes request
   admission and invalidates any already-admitted revision before task cancellation returns control.
-- **PX-RESPONSE-01:** Every REST response contract requires both `success` and `errorCode`, and
-  acceptance requires exactly `success == true` and `errorCode == 0`. Missing or contradictory status
-  fields are semantic failures; for mutations and session validation they are ambiguous fail-closed
-  outcomes.
+- **PX-RESPONSE-01:** Every structured REST response contract requires both `success` and
+  `errorCode`, and acceptance requires exactly `success == true` and `errorCode == 0`. Missing or
+  contradictory status fields are semantic failures; for mutations and session validation they are
+  ambiguous fail-closed outcomes. The sole raw-body exception is the provider-documented,
+  unauthenticated `/api/Status/ping`, whose size-bounded body must equal exactly `pong`.
 - **PX-ACCOUNT-01:** Active-account discovery sends exactly `onlyActiveAccounts: true` to
   `/api/Account/search`.
 - **PX-RUNTIME-01:** The caller owns the async runtime. The library must not create a hidden Tokio

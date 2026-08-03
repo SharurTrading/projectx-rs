@@ -17,13 +17,15 @@ use tokio::{task::JoinHandle, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Account, AccountId, Bar, CancelOrder, CloseContract, Contract, Credentials, Endpoints, Error,
-    HistoryRequest, Hub, ModifyOrder, OperationResponse, Order, OrderPage, OrderQuery,
-    OrderResponse, OrderSearch, PartialCloseContract, PlaceOrder, Position, ProviderError,
-    RateLimitConfig, RateLimitKind, RealtimeClient, SearchContracts, Trade, TradeSearch,
+    Account, AccountId, ApplicationCredentials, Bar, CancelOrder, CloseContract, Contract,
+    Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, OperationResponse, Order,
+    OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch, PartialCloseContract, PlaceOrder,
+    Position, ProviderError, RateLimitConfig, RateLimitKind, RealtimeClient, SearchContracts,
+    Trade, TradeQuery, TradeSearch,
+    credentials::AuthenticationCredentials,
     models::{
-        AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrdersBody,
-        PlaceOrderBody, PositionsBody, TradesBody,
+        AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrderBody,
+        OrdersBody, PlaceOrderBody, PositionsBody, TradesBody,
     },
     rate_limit::RateLimits,
     token::{TokenRevision, TokenSnapshot, TokenStore, UpdateOutcome},
@@ -45,7 +47,7 @@ const USER_AGENT: &str = concat!("projectx-client/", env!("CARGO_PKG_VERSION"));
 /// capacity before their HTTP timeout begins. Money-moving mutations instead
 /// return [`Error::LocallyRateLimited`] without sending when capacity is full.
 pub struct Client {
-    credentials: Arc<Credentials>,
+    credentials: Arc<AuthenticationCredentials>,
     endpoints: Endpoints,
     http: reqwest::Client,
     realtime_http: reqwest::Client,
@@ -55,6 +57,40 @@ pub struct Client {
     max_retries: u32,
     retry_initial: Duration,
     retry_max: Duration,
+}
+
+/// Invalidates the exact session admitted to a logout request unless the
+/// provider definitively rejected the request before admission.
+struct LogoutAttempt {
+    store: Arc<TokenStore>,
+    basis: TokenSnapshot,
+    armed: bool,
+}
+
+impl LogoutAttempt {
+    fn new(store: Arc<TokenStore>, basis: TokenSnapshot) -> Self {
+        Self {
+            store,
+            basis,
+            armed: true,
+        }
+    }
+
+    fn basis(&self) -> &TokenSnapshot {
+        &self.basis
+    }
+
+    fn retain_session(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LogoutAttempt {
+    fn drop(&mut self) {
+        if self.armed {
+            self.store.invalidate_if_current(&self.basis);
+        }
+    }
 }
 
 /// Invalidates one exact session revision unless validation reaches a
@@ -154,9 +190,14 @@ impl ValidationTracker {
 }
 
 impl Client {
-    /// Starts configuring a client with explicit credentials.
+    /// Starts configuring a client with explicit API-key credentials.
     pub fn builder(credentials: Credentials) -> ClientBuilder {
-        ClientBuilder::new(credentials)
+        ClientBuilder::new(AuthenticationCredentials::ApiKey(credentials))
+    }
+
+    /// Starts configuring a client with authorized-application credentials.
+    pub fn application_builder(credentials: ApplicationCredentials) -> ClientBuilder {
+        ClientBuilder::new(AuthenticationCredentials::Application(credentials))
     }
 
     /// Creates a real-time client sharing this client's rotating bearer token.
@@ -173,7 +214,12 @@ impl Client {
         )
     }
 
-    /// Authenticates with `/api/Auth/loginKey` and stores the returned token.
+    /// Authenticates with the endpoint selected by the configured credential type.
+    ///
+    /// API-key credentials send exactly `userName` and `apiKey` to
+    /// `/api/Auth/loginKey`. Authorized-application credentials send exactly
+    /// `userName`, `password`, `deviceId`, `appId`, and `verifyKey` to
+    /// `/api/Auth/loginApp`.
     ///
     /// # Errors
     ///
@@ -181,13 +227,27 @@ impl Client {
     /// provider omits a usable token.
     pub async fn authenticate(&self) -> Result<(), Error> {
         let attempt = self.token.begin_authentication();
-        let body = LoginRequest {
-            user_name: self.credentials.expose_user_name(),
-            api_key: self.credentials.expose_api_key(),
+        let response: LoginResponse = match self.credentials.as_ref() {
+            AuthenticationCredentials::ApiKey(credentials) => {
+                let body = LoginApiKeyRequest {
+                    user_name: credentials.expose_user_name(),
+                    api_key: credentials.expose_api_key(),
+                };
+                self.post_unauthenticated("api/Auth/loginKey", &body)
+                    .await?
+            }
+            AuthenticationCredentials::Application(credentials) => {
+                let body = LoginAppRequest {
+                    user_name: credentials.expose_user_name(),
+                    password: credentials.expose_password(),
+                    device_id: credentials.expose_device_id(),
+                    app_id: credentials.expose_app_id(),
+                    verify_key: credentials.expose_verify_key(),
+                };
+                self.post_unauthenticated("api/Auth/loginApp", &body)
+                    .await?
+            }
         };
-        let response: LoginResponse = self
-            .post_unauthenticated("api/Auth/loginKey", &body)
-            .await?;
         validate_response_status(response.success, response.error_code)?;
         if !response.success {
             return Err(Error::CredentialsRejected {
@@ -292,6 +352,84 @@ impl Client {
         self.validate_session_tracked(None).await
     }
 
+    /// Logs out the current provider session exactly once.
+    ///
+    /// A request that may have reached the provider invalidates only the exact
+    /// bearer-token revision it used, including when the future is cancelled or
+    /// the response is ambiguous. A definitive connection failure or HTTP 429
+    /// retains that revision because the provider did not admit the logout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when unauthenticated, locally or remotely rate limited,
+    /// rejected by the provider, or when no trustworthy response is available.
+    pub async fn logout(&self) -> Result<OperationResponse, Error> {
+        self.require_authentication()?;
+        let url = self.endpoints.api_url("api/Auth/logout")?;
+        self.rate_limits
+            .try_acquire(RateLimitKind::General)
+            .map_err(|retry_after| Error::LocallyRateLimited {
+                kind: RateLimitKind::General,
+                retry_after,
+            })?;
+        let basis = self
+            .token
+            .versioned_snapshot()
+            .ok_or(Error::NotAuthenticated)?;
+        let attempt = LogoutAttempt::new(Arc::clone(&self.token), basis);
+        let response = match self
+            .http
+            .request(Method::POST, url)
+            .bearer_auth(attempt.basis().expose())
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is_connect() || error.is_builder() => {
+                attempt.retain_session();
+                return Err(Error::Transport(error));
+            }
+            Err(error) => return Err(Error::Transport(error)),
+        };
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after =
+                self.apply_provider_cooldown(RateLimitKind::General, response.headers());
+            attempt.retain_session();
+            return Err(Error::ProviderRateLimited {
+                kind: RateLimitKind::General,
+                retry_after,
+            });
+        }
+        let response: Envelope<EmptyBody> = self.decode(response).await?;
+        accepted(response)?;
+        Ok(OperationResponse)
+    }
+
+    /// Checks whether the provider REST service is responsive.
+    ///
+    /// This unauthenticated operation expects the provider's exact `pong`
+    /// response and applies the configured response-size bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for URL, transport, HTTP status, response-size, or
+    /// unexpected-response failures.
+    pub async fn ping(&self) -> Result<(), Error> {
+        let url = self.endpoints.api_url("api/Status/ping")?;
+        let response = self
+            .http
+            .request(Method::GET, url)
+            .send()
+            .await
+            .map_err(Error::Transport)?;
+        let bytes = self.read_bounded_response(response).await?;
+        if bytes == b"pong" {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedStatusResponse)
+        }
+    }
+
     async fn validate_session_tracked(
         &self,
         tracker: Option<Arc<ValidationTracker>>,
@@ -337,12 +475,24 @@ impl Client {
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn search_active_accounts(&self) -> Result<Vec<Account>, Error> {
+        self.search_accounts(true).await
+    }
+
+    /// Searches accounts for the authenticated user.
+    ///
+    /// Set `only_active_accounts` to `false` to include inactive accounts. Use
+    /// [`Self::search_active_accounts`] when only active accounts are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for authentication, transport, provider, or decode failures.
+    pub async fn search_accounts(&self, only_active_accounts: bool) -> Result<Vec<Account>, Error> {
         let response: Envelope<AccountsBody> = self
             .post_authenticated(
                 RateLimitKind::General,
                 "api/Account/search",
                 &AccountSearchRequest {
-                    only_active_accounts: true,
+                    only_active_accounts,
                 },
             )
             .await?;
@@ -420,6 +570,29 @@ impl Client {
             .post_authenticated(RateLimitKind::General, "api/Order/search", request)
             .await?;
         Ok(accepted(response)?.orders)
+    }
+
+    /// Retrieves one order by its provider account and order identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for authentication, transport, provider, or decode failures.
+    pub async fn order_by_id(
+        &self,
+        account_id: AccountId,
+        order_id: OrderId,
+    ) -> Result<Order, Error> {
+        let response: Envelope<OrderBody> = self
+            .post_authenticated(
+                RateLimitKind::General,
+                "api/Order/searchById",
+                &AccountOrderRequest {
+                    account_id,
+                    order_id,
+                },
+            )
+            .await?;
+        Ok(accepted(response)?.order)
     }
 
     /// Searches currently open orders for an account.
@@ -583,6 +756,21 @@ impl Client {
         Ok(accepted(response)?.trades)
     }
 
+    /// Searches trades with optional start and end timestamp bounds.
+    ///
+    /// Unlike [`Self::search_trades`], a [`TradeQuery`] can omit either or both
+    /// timestamp bounds to express the provider's complete request schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for authentication, transport, provider, or decode failures.
+    pub async fn query_trades(&self, request: &TradeQuery) -> Result<Vec<Trade>, Error> {
+        let response: Envelope<TradesBody> = self
+            .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
+            .await?;
+        Ok(accepted(response)?.trades)
+    }
+
     async fn mutation<T>(&self, kind: MutationKind, request: &T) -> Result<OperationResponse, Error>
     where
         T: Serialize + ?Sized,
@@ -707,10 +895,7 @@ impl Client {
             .body(body.to_vec());
         let response = request.send().await.map_err(Error::Transport)?;
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
-                .unwrap_or_else(|| self.rate_limits.limit(kind).window())
-                .min(MAX_SERVER_RETRY_AFTER);
-            self.rate_limits.cool_down(kind, retry_after);
+            let retry_after = self.apply_provider_cooldown(kind, response.headers());
             return Err(Error::ProviderRateLimited { kind, retry_after });
         }
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -769,11 +954,8 @@ impl Client {
             Err(_error) => return Err(Error::AmbiguousSessionValidation),
         };
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers(), SystemTime::now())
-                .unwrap_or_else(|| self.rate_limits.limit(RateLimitKind::General).window())
-                .min(MAX_SERVER_RETRY_AFTER);
-            self.rate_limits
-                .cool_down(RateLimitKind::General, retry_after);
+            let retry_after =
+                self.apply_provider_cooldown(RateLimitKind::General, response.headers());
             attempt.disarm();
             return Err(Error::ProviderRateLimited {
                 kind: RateLimitKind::General,
@@ -789,6 +971,18 @@ impl Client {
         Ok((response, attempt))
     }
 
+    fn apply_provider_cooldown(
+        &self,
+        kind: RateLimitKind,
+        headers: &header::HeaderMap,
+    ) -> Duration {
+        let retry_after = parse_retry_after(headers, SystemTime::now())
+            .unwrap_or_else(|| self.rate_limits.limit(kind).window())
+            .min(MAX_SERVER_RETRY_AFTER);
+        self.rate_limits.cool_down(kind, retry_after);
+        retry_after
+    }
+
     fn require_authentication(&self) -> Result<(), Error> {
         if self.token.is_authenticated() {
             Ok(())
@@ -801,6 +995,11 @@ impl Client {
     where
         R: DeserializeOwned,
     {
+        let bytes = self.read_bounded_response(response).await?;
+        serde_json::from_slice(&bytes).map_err(Error::Decode)
+    }
+
+    async fn read_bounded_response(&self, response: reqwest::Response) -> Result<Vec<u8>, Error> {
         let status = response.status();
         if !status.is_success() {
             return Err(Error::UnexpectedStatus {
@@ -828,7 +1027,7 @@ impl Client {
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(Error::Decode)
+        Ok(bytes)
     }
 }
 
@@ -933,7 +1132,7 @@ impl Drop for SessionValidator {
 /// Builder for [`Client`].
 #[must_use]
 pub struct ClientBuilder {
-    credentials: Credentials,
+    credentials: AuthenticationCredentials,
     endpoints: Endpoints,
     timeout: Duration,
     response_limit: usize,
@@ -945,7 +1144,7 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
-    fn new(credentials: Credentials) -> Self {
+    fn new(credentials: AuthenticationCredentials) -> Self {
         Self {
             credentials,
             endpoints: Endpoints::default(),
@@ -1249,9 +1448,19 @@ fn validate_response_status(success: bool, code: i32) -> Result<(), Error> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LoginRequest<'a> {
+struct LoginApiKeyRequest<'a> {
     user_name: &'a str,
     api_key: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginAppRequest<'a> {
+    user_name: &'a str,
+    password: &'a str,
+    device_id: &'a str,
+    app_id: &'a str,
+    verify_key: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -1285,6 +1494,13 @@ struct AvailableContractsRequest {
 #[serde(rename_all = "camelCase")]
 struct AccountRequest {
     account_id: AccountId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountOrderRequest {
+    account_id: AccountId,
+    order_id: OrderId,
 }
 
 #[derive(Serialize)]
