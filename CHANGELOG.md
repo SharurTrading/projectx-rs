@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Kevin Monaghan
-SPDX-License-Identifier: MIT
+SPDX-License-Identifier: MIT-0
 -->
 
 # Changelog
@@ -9,6 +9,11 @@ All notable changes will be documented here. This project follows Semantic Versi
 first public release.
 
 ## [Unreleased]
+
+### Changed
+
+- Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
+  is dropped while the existing permissive terms otherwise remain unchanged.
 
 ## [2.0.0] - 2026-08-03
 

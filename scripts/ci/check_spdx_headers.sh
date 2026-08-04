@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Kevin Monaghan
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT-0
 
 set -euo pipefail
 
@@ -16,8 +16,8 @@ while IFS= read -r -d '' file; do
     status=1
   fi
   if ! head -n 8 -- "${file}" | grep --fixed-strings --quiet \
-    "SPDX-License-Identifier: MIT"; then
-    printf 'missing MIT SPDX license header: %s\n' "${file}" >&2
+    "SPDX-License-Identifier: MIT-0"; then
+    printf 'missing MIT-0 SPDX license header: %s\n' "${file}" >&2
     status=1
   fi
 done < <(git ls-files --cached --others --exclude-standard -z -- \

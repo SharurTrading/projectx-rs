@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Kevin Monaghan
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT-0
 
 name: CI
 
@@ -51,7 +51,7 @@ jobs:
       - name: cargo fmt --all -- --check
         run: cargo fmt --all -- --check
 
-      - name: Verify MIT SPDX headers
+      - name: Verify MIT-0 SPDX headers
         run: bash scripts/ci/check_spdx_headers.sh
 
       - name: Verify secret-safe WebSocket dependency features
