@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Kevin Monaghan
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT-0
 
 [package]
 name = "projectx-client"
@@ -11,7 +11,7 @@ repository = "https://github.com/SharurTrading/projectx-rs"
 homepage = "https://github.com/SharurTrading/projectx-rs"
 documentation = "https://docs.rs/projectx-client"
 readme = "README.md"
-license = "MIT"
+license = "MIT-0"
 keywords = ["projectx", "topstepx", "trading", "futures", "api-client"]
 categories = ["api-bindings", "asynchronous", "network-programming"]
 publish = ["crates-io"]

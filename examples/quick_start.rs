@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Kevin Monaghan
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT-0
 
 //! Authenticates and discovers the active accounts available to the user.
 

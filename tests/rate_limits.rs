@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Kevin Monaghan
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT-0
 
 //! Public rate-limit contract tests using synthetic local fixtures.
 

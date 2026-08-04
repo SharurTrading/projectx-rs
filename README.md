@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2026 Kevin Monaghan
-SPDX-License-Identifier: MIT
+SPDX-License-Identifier: MIT-0
 -->
 
 # projectx-rs
@@ -8,13 +8,14 @@ SPDX-License-Identifier: MIT
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=2.0.0)](https://crates.io/crates/projectx-client/2.0.0)
 [![docs.rs](https://img.shields.io/docsrs/projectx-client/2.0.0?v=2.0.0)](https://docs.rs/projectx-client/2.0.0/projectx_client/)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
 
-This project is available under the [MIT License](LICENSE). It is an independent, unofficial client
-and is not affiliated with, endorsed by, or sponsored by ProjectX Trading LLC. Users are responsible
-for complying with the provider's terms and maintaining an active API subscription where required.
+This project is available under the [MIT No Attribution License (MIT-0)](LICENSE). It is an
+independent, unofficial client and is not affiliated with, endorsed by, or sponsored by ProjectX
+Trading LLC. Users are responsible for complying with the provider's terms and maintaining an active
+API subscription where required.
 
 Use the official [ProjectX Gateway API documentation](https://gateway.docs.projectx.com/) as the
 reference for provider endpoints, request fields, response payloads, and subscription requirements.
@@ -422,4 +423,4 @@ All three must pass for the live validation gate.
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [MIT No Attribution License (MIT-0)](LICENSE).
