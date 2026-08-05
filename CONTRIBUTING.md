@@ -7,6 +7,14 @@ SPDX-License-Identifier: MIT-0
 
 Contributions are welcome. Changes must follow `AGENTS.md` and pass:
 
+Optionally install the local pre-commit hook (fmt check + strict Clippy) with:
+
+```text
+git config core.hooksPath hooks
+```
+
+Hooks can be bypassed with `git commit --no-verify`; the CI run remains the authoritative gate.
+
 ```text
 cargo fmt --all -- --check
 bash scripts/ci/check_spdx_headers.sh
