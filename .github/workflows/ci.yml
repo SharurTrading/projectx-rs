@@ -18,8 +18,119 @@ concurrency:
 permissions:
   contents: read
 
+# Path filtering:
+#   The workflow ALWAYS triggers (no `paths:` filter on `on:`). A required
+#   status check whose workflow is path-filtered out never reports, leaving a
+#   PR wedged as "Expected" forever. Instead, an upfront `changes` job
+#   inspects the diff via the GitHub API (no checkout) and emits a `platform`
+#   boolean. When `platform=false` (docs-only or non-gate config changes),
+#   each cargo-gated job is SKIPPED at the job level via its `if:` — no runner
+#   is allocated — and a skipped required check counts as satisfied. Fail-safe:
+#   any detection error (API failure, truncation, unknown event) defaults to
+#   `platform=true`, so a detection miss can never silently skip a real Rust
+#   change; the cost of a false positive is one wasted run.
 jobs:
+  changes:
+    name: detect-changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platform: ${{ steps.detect.outputs.platform }}
+    steps:
+      - name: Detect Rust-affecting changes
+        id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Resolve the changed-file list WITHOUT a checkout:
+          #   - pull_request: page the PR files API. Renames contribute BOTH
+          #     the new `filename` and the old `previous_filename`, so a rename
+          #     out of a gated path still trips the flag (fail-safe direction).
+          #   - push: the compare API over event.before...event.sha (main is
+          #     fast-forward only, so three-dot equals the literal range).
+          # Anything else falls through to the fail-safe branch that forces
+          # platform=true. Both list APIs are size-capped (3000 for PR files,
+          # 300 for push compare); truncation also fails open.
+          changed=""
+          ok=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if ! pr_json=$(gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" 2>&1); then
+              echo "::warning::PR files API failed: $pr_json"
+              ok=false
+            else
+              nfiles=$(printf '%s' "$pr_json" | jq 'length')
+              if [ "${nfiles:-0}" -ge 3000 ]; then
+                echo "::warning::PR touches >=3000 files (API cap); file list truncated, running full scope."
+                ok=false
+              else
+                changed=$(printf '%s' "$pr_json" | jq -r '.[].filename, (.[] | select(.previous_filename) | .previous_filename)')
+              fi
+            fi
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$PUSH_BEFORE" ]; then
+              echo "::warning::push has no prior tip (new ref); cannot diff without a clone."
+              ok=false
+            elif ! cmp_json=$(gh api "repos/${GH_REPO}/compare/${PUSH_BEFORE}...${PUSH_AFTER}" 2>&1); then
+              echo "::warning::compare API failed: $cmp_json"
+              ok=false
+            else
+              nfiles=$(printf '%s' "$cmp_json" | jq '.files | length')
+              if [ "${nfiles:-0}" -ge 300 ]; then
+                echo "::warning::push compares >=300 files (compare API cap); file list truncated, running full scope."
+                ok=false
+              else
+                changed=$(printf '%s' "$cmp_json" | jq -r '.files[].filename, (.files[] | select(.previous_filename) | .previous_filename)')
+              fi
+            fi
+          else
+            echo "Event '$EVENT_NAME' has no diff context; running full scope."
+            ok=false
+          fi
+
+          if [ "$ok" != "true" ]; then
+            echo "::warning::Could not resolve changed files; defaulting platform=true so the cargo jobs still run with full scope."
+            echo "platform=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+
+          # Run the cargo jobs only when a Rust-affecting file remains:
+          #   - any *.rs source (src/, tests/, examples/, build.rs)
+          #   - Cargo manifest or lock (new crate / dep change)
+          #   - rust-toolchain / clippy / deny .toml (toolchain + lint + license gates)
+          #   - scripts/ci/** (the checks the cargo jobs invoke)
+          # A docs-only, workflow-only, or non-gate config PR is NOT
+          # Rust-affecting — the code is unchanged, so the cargo result is
+          # identical to main's. Validate a workflow-only change that alters
+          # the build via `gh workflow run ci.yml` (workflow_dispatch) or on
+          # the next main run.
+          rust_pat='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rust-toolchain|clippy|deny)\.toml$|^scripts/ci/'
+          # NOTE: match via here-string, NOT `printf | grep -q`. Under
+          # `set -o pipefail`, grep -q exits on the first match and closes the
+          # pipe, flipping the whole condition to false on large diff lists.
+          if grep -qE "$rust_pat" <<< "$changed"; then
+            echo "platform=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Detected Rust-affecting changes — cargo jobs will run."
+          else
+            echo "platform=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Rust-affecting changes — cargo jobs are skipped (a skipped required check satisfies the merge gate)."
+          fi
+
   quality:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result != 'cancelled' && needs.changes.result != 'skipped' && (needs.changes.outputs.platform != 'false' || needs.changes.result != 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -84,6 +195,8 @@ jobs:
         run: cargo package --locked
 
   supply-chain:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result != 'cancelled' && needs.changes.result != 'skipped' && (needs.changes.outputs.platform != 'false' || needs.changes.result != 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
