@@ -9,7 +9,7 @@ cd "$(git rev-parse --show-toplevel)"
 printf '%s\n' 'running: cargo fmt --all -- --check'
 cargo fmt --all -- --check
 
-printf '%s\n' 'running: cargo clippy --all-targets --all-features --locked --strict'
+printf '%s\n' 'running: cargo clippy --all-targets --all-features --locked -- -D warnings -D clippy::pedantic -D clippy::await_holding_lock -D clippy::expect_used -D clippy::unwrap_used'
 cargo clippy --all-targets --all-features --locked -- \
   -D warnings \
   -D clippy::pedantic \
