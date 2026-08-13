@@ -110,13 +110,14 @@ jobs:
           #   - any *.rs source (src/, tests/, examples/, build.rs)
           #   - Cargo manifest or lock (new crate / dep change)
           #   - rust-toolchain / clippy / deny .toml (toolchain + lint + license gates)
+          #   - .cargo/audit.toml (cargo-audit advisory gate)
           #   - scripts/ci/** (the checks the cargo jobs invoke)
           # A docs-only, workflow-only, or non-gate config PR is NOT
           # Rust-affecting — the code is unchanged, so the cargo result is
           # identical to main's. Validate a workflow-only change that alters
           # the build via `gh workflow run ci.yml` (workflow_dispatch) or on
           # the next main run.
-          rust_pat='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rust-toolchain|clippy|deny)\.toml$|^scripts/ci/'
+          rust_pat='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rust-toolchain|clippy|deny)\.toml$|(^|/)\.cargo/audit\.toml$|^scripts/ci/'
           # NOTE: match via here-string, NOT `printf | grep -q`. Under
           # `set -o pipefail`, grep -q exits on the first match and closes the
           # pipe, flipping the whole condition to false on large diff lists.
