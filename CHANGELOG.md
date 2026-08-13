@@ -14,6 +14,16 @@ first public release.
 
 - Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
   is dropped while the existing permissive terms otherwise remain unchanged.
+- Update the `data-encoding` dependency from 2.11.0 to 2.11.1.
+- Refresh CI action pins (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `taiki-e/install-action`)
+  to their current patch releases.
+
+### Security
+
+- Document RustSec advisory RUSTSEC-2026-0235 (rkyv 0.7.x) as not affecting this crate: the
+  vulnerable dependency is only an optional, unactivated feature of `rust_decimal` and is never
+  compiled. CI records the justified `cargo audit` ignore and is revisited when `rust_decimal`
+  moves that feature to rkyv 0.8.17 or later.
 
 ## [2.0.0] - 2026-08-03
 
