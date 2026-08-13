@@ -235,6 +235,9 @@ jobs:
       - name: cargo audit
         run: cargo audit --file Cargo.lock --deny warnings
 
+      - name: Verify vulnerable rkyv feature path stays inactive
+        run: bash scripts/ci/check_rkyv_inactive.sh
+
   secret-scan:
     name: Secret scan (full history)
     runs-on: ubuntu-latest

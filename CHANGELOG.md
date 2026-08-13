@@ -22,8 +22,9 @@ first public release.
 
 - Document RustSec advisory RUSTSEC-2026-0235 (rkyv 0.7.x) as not affecting this crate: the
   vulnerable dependency is only an optional, unactivated feature of `rust_decimal` and is never
-  compiled. CI records the justified `cargo audit` ignore and is revisited when `rust_decimal`
-  moves that feature to rkyv 0.8.17 or later.
+  compiled. CI records the justified `cargo audit` ignore and enforces a guard that fails the
+  build if the rkyv 0.7 feature path ever becomes active; the ignore is removed once
+  `rust_decimal` moves that feature to rkyv 0.8.17 or later.
 
 ## [2.0.0] - 2026-08-03
 

@@ -6,7 +6,11 @@
 # It cannot be resolved by upgrade: the 0.7 series has no patched release, and
 # the latest rust_decimal (1.42.1) still declares rkyv ^0.7.46 as an optional
 # feature. projectx-client never enables rust_decimal's `rkyv` feature, so the
-# vulnerable code is not compiled into this crate or its consumers.
-# Revisit when rust_decimal moves its optional feature to rkyv >= 0.8.17.
+# vulnerable code is not compiled into this crate. The ignore is sound only
+# while that feature path stays inactive in this crate's feature graph:
+# downstream feature unification could still activate rust_decimal/rkyv, and
+# scripts/ci/check_rkyv_inactive.sh fails CI if that ever happens.
+# Remove this ignore once rust_decimal moves its optional feature to
+# rkyv >= 0.8.17.
 [advisories]
 ignore = ["RUSTSEC-2026-0235"]
