@@ -14,7 +14,8 @@ first public release.
 
 - Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
   is dropped while the existing permissive terms otherwise remain unchanged.
-- Update the `data-encoding` dependency from 2.11.0 to 2.11.1.
+- Update the `data-encoding` dependency from 2.11.0 to 2.11.1 and `thiserror` from 2.0.19 to
+  2.0.20.
 - Refresh CI action pins (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `taiki-e/install-action`)
   to their current patch releases.
 
