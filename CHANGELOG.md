@@ -15,9 +15,9 @@ first public release.
 - Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
   is dropped while the existing permissive terms otherwise remain unchanged.
 - Update the `data-encoding` dependency from 2.11.0 to 2.11.1, `thiserror` from 2.0.19 to 2.0.20,
-  and `futures-util` from 0.3.33 to 0.3.34.
+  `futures-util` from 0.3.33 to 0.3.34, and `log` from 0.4.33 to 0.4.34.
 - Refresh CI action pins (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `taiki-e/install-action`)
-  to their current patch releases; `taiki-e/install-action` is now pinned to v2.85.13.
+  to their current patch releases; `taiki-e/install-action` is now pinned to v2.87.0.
 - Update the transitive `h2` lockfile entry from 0.4.15 to 0.4.19 and `chacha20` from 0.10.1 to
   0.10.2, clearing a `cargo deny` yanked-crate error on the withdrawn `chacha20` 0.10.1 release
   reached through `rand` 0.10.2.
