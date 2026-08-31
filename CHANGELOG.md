@@ -18,9 +18,15 @@ first public release.
   and `futures-util` from 0.3.33 to 0.3.34.
 - Refresh CI action pins (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `taiki-e/install-action`)
   to their current patch releases; `taiki-e/install-action` is now pinned to v2.85.13.
+- Update the transitive `h2` lockfile entry from 0.4.15 to 0.4.19 and `chacha20` from 0.10.1 to
+  0.10.2, clearing a `cargo deny` yanked-crate error on the withdrawn `chacha20` 0.10.1 release
+  reached through `rand` 0.10.2.
 
 ### Security
 
+- Resolve RustSec advisory RUSTSEC-2026-0258 (`h2` unbounded empty DATA frames) by moving the
+  transitive `h2` dependency to 0.4.19, which is past the patched 0.4.16 release. The crate reaches
+  `h2` through `reqwest`/`hyper`, so no source change is required.
 - Document RustSec advisory RUSTSEC-2026-0235 (rkyv 0.7.x) as not affecting this crate: the
   vulnerable dependency is only an optional, unactivated feature of `rust_decimal` and is never
   compiled. CI records the justified `cargo audit` ignore and enforces a guard that fails the
