@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=2.0.0)](https://crates.io/crates/projectx-client/2.0.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/2.0.0?v=2.0.0)](https://docs.rs/projectx-client/2.0.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=2.1.0)](https://crates.io/crates/projectx-client/2.1.0)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/2.1.0?v=2.1.0)](https://docs.rs/projectx-client/2.1.0/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -80,6 +80,11 @@ async fn main() -> Result<(), projectx_client::Error> {
 
 Applications should source secrets outside this library and must not log credentials or bearer
 tokens. See [SECURITY.md](SECURITY.md).
+
+By default a client targets the hosted TopstepX endpoints (`https://api.topstepx.com` with the
+`rtc.topstepx.com` hubs). Select the hosted TheFuturesDesk deployment with
+`ClientBuilder::endpoints(Endpoints::thefuturesdesk())`, or `Endpoints::custom` for any other
+ProjectX Gateway deployment. Both credential types work against either hosted deployment.
 
 ## Feature coverage
 

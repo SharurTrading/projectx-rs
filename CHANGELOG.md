@@ -10,6 +10,15 @@ first public release.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-06
+
+### Added
+
+- Add an `Endpoints::thefuturesdesk()` preset selecting the hosted TheFuturesDesk Gateway deployment
+  (`https://api.thefuturesdesk.projectx.com` and its `rtc.thefuturesdesk.projectx.com` hubs) to
+  complement the TopstepX default. Both API-key and authorized-application credentials work against
+  either hosted preset.
+
 ### Changed
 
 - Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
@@ -104,7 +113,8 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v2.0.0
 [1.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SharurTrading/projectx-rs/releases/tag/v1.0.0

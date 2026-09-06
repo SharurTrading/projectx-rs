@@ -24,6 +24,15 @@ impl Endpoints {
         }
     }
 
+    /// Returns the hosted `TheFuturesDesk` endpoints.
+    #[must_use]
+    pub fn thefuturesdesk() -> Self {
+        Self {
+            api_base: "https://api.thefuturesdesk.projectx.com/".to_owned(),
+            realtime_base: "https://rtc.thefuturesdesk.projectx.com/".to_owned(),
+        }
+    }
+
     /// Creates a custom `ProjectX` endpoint pair.
     ///
     /// # Errors
@@ -130,6 +139,54 @@ fn has_loopback_host(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_endpoint_presets_match_the_documented_provider_urls() {
+        let topstepx = Endpoints::topstepx();
+        assert_eq!(topstepx.api_base(), "https://api.topstepx.com/");
+        assert_eq!(topstepx.realtime_base(), "https://rtc.topstepx.com/");
+        assert_eq!(
+            topstepx
+                .hub_url("user")
+                .unwrap_or_else(|error| panic!("fixture hub URL must be valid: {error}"))
+                .as_str(),
+            "wss://rtc.topstepx.com/hubs/user"
+        );
+        assert_eq!(
+            topstepx
+                .api_url("api/Auth/loginKey")
+                .unwrap_or_else(|error| panic!("fixture API URL must be valid: {error}"))
+                .as_str(),
+            "https://api.topstepx.com/api/Auth/loginKey"
+        );
+
+        let thefuturesdesk = Endpoints::thefuturesdesk();
+        assert_eq!(
+            thefuturesdesk.api_base(),
+            "https://api.thefuturesdesk.projectx.com/"
+        );
+        assert_eq!(
+            thefuturesdesk.realtime_base(),
+            "https://rtc.thefuturesdesk.projectx.com/"
+        );
+        assert_eq!(
+            thefuturesdesk
+                .hub_url("market")
+                .unwrap_or_else(|error| panic!("fixture hub URL must be valid: {error}"))
+                .as_str(),
+            "wss://rtc.thefuturesdesk.projectx.com/hubs/market"
+        );
+        assert_eq!(
+            thefuturesdesk
+                .api_url("api/Auth/loginKey")
+                .unwrap_or_else(|error| panic!("fixture API URL must be valid: {error}"))
+                .as_str(),
+            "https://api.thefuturesdesk.projectx.com/api/Auth/loginKey"
+        );
+
+        assert_eq!(Endpoints::default(), topstepx);
+        assert_ne!(thefuturesdesk, topstepx);
+    }
 
     #[test]
     fn custom_endpoints_normalize_trailing_slashes() {
