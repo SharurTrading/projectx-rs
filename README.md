@@ -81,6 +81,11 @@ async fn main() -> Result<(), projectx_client::Error> {
 Applications should source secrets outside this library and must not log credentials or bearer
 tokens. See [SECURITY.md](SECURITY.md).
 
+By default a client targets the hosted TopstepX endpoints (`https://api.topstepx.com` with the
+`rtc.topstepx.com` hubs). Select the hosted TheFuturesDesk deployment with
+`ClientBuilder::endpoints(Endpoints::thefuturesdesk())`, or `Endpoints::custom` for any other
+ProjectX Gateway deployment. Both credential types work against either hosted deployment.
+
 ## Feature coverage
 
 The current client surface covers every REST operation in the provider's published Gateway

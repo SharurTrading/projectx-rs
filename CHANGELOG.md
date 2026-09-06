@@ -10,6 +10,13 @@ first public release.
 
 ## [Unreleased]
 
+### Added
+
+- Add an `Endpoints::thefuturesdesk()` preset selecting the hosted TheFuturesDesk Gateway deployment
+  (`https://api.thefuturesdesk.projectx.com` and its `rtc.thefuturesdesk.projectx.com` hubs) to
+  complement the TopstepX default. Both API-key and authorized-application credentials work against
+  either hosted preset.
+
 ### Changed
 
 - Relicense the project under the MIT No Attribution License (MIT-0): the attribution requirement
