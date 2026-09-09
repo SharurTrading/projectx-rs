@@ -553,6 +553,7 @@ impl Lifecycle {
 }
 
 struct Session {
+    runtime: tokio::runtime::Handle,
     generation: u64,
     writer: mpsc::Sender<Message>,
     cancellation: CancellationToken,
@@ -1046,6 +1047,7 @@ impl RealtimeInner {
             start.clone(),
         ));
         let session = Session {
+            runtime: tokio::runtime::Handle::current(),
             generation: claim.generation,
             writer,
             cancellation: session_cancellation,
@@ -1249,7 +1251,10 @@ impl RealtimeInner {
         self.fail_pending_generation(generation);
         let inner = Arc::clone(self);
         let mut slot = self.retirement_task.lock();
-        *slot = Some(tokio::spawn(async move {
+        // Drop can run on an ordinary thread. Retire on the socket's original
+        // runtime, preserving joined evidence without requiring ambient context.
+        let runtime = session.runtime.clone();
+        *slot = Some(runtime.spawn(async move {
             // A stuck writer cannot delay a real transport-loss boundary forever.
             // Abort only after cancellation, then join before publishing evidence.
             if graceful && send_queued(&session.writer, Message::Close(None)).is_err() {
@@ -2011,6 +2016,7 @@ mod tests {
     fn install_connected_generation(inner: &Arc<RealtimeInner>, generation: u64) {
         let (writer, _writer_rx) = mpsc::channel(1);
         let session = Session {
+            runtime: tokio::runtime::Handle::current(),
             generation,
             writer,
             cancellation: CancellationToken::new(),
@@ -2032,6 +2038,7 @@ mod tests {
     ) -> mpsc::Receiver<Message> {
         let (writer, writer_rx) = mpsc::channel(1);
         let session = Session {
+            runtime: tokio::runtime::Handle::current(),
             generation,
             writer,
             cancellation: CancellationToken::new(),
@@ -2333,6 +2340,7 @@ mod tests {
         let writer_probe = Probe(Arc::clone(&stopped));
         let writer_cancel = cancel.clone();
         let session = Session {
+            runtime: tokio::runtime::Handle::current(),
             generation: 1,
             writer,
             cancellation: cancel,
@@ -2806,5 +2814,27 @@ mod tests {
                 max_bytes: MAX_OUTBOUND_INVOCATION_SIZE
             })
         ));
+    }
+    #[test]
+    fn dropping_ready_client_outside_a_runtime_joins_on_its_original_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("fixture runtime: {error}"));
+        let (realtime, mut events) = runtime.block_on(async {
+            let realtime = fixture_realtime();
+            install_connected_generation(&realtime.inner, 1);
+            let events = realtime
+                .take_event_receiver()
+                .unwrap_or_else(|| panic!("receiver"));
+            (realtime, events)
+        });
+        // Ordinary caller thread: no ambient Tokio context exists here.
+        drop(realtime);
+        runtime.block_on(async {
+            tokio::time::pause();
+            assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+            assert_eq!(events.recv().await, None);
+        });
     }
 }
