@@ -8,9 +8,9 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [3.0.0] - 2026-09-09
 
-### Breaking changes for 3.0.0
+### Breaking changes
 
 - Make event, writer and pending-invocation capacities and invocation deadlines configurable on
   `ClientBuilder`. Remove the estimated event-memory budget and unsupported WebSocket frame,
@@ -146,7 +146,8 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v2.0.0
 [1.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.0...v1.0.1
