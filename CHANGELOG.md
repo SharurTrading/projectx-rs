@@ -10,6 +10,18 @@ first public release.
 
 ## [Unreleased]
 
+### Changed
+
+- Update the `rust_decimal` lockfile resolution from 1.42.1 to 1.43.0, picking up upstream fixes
+  and performance improvements, and refresh the `taiki-e/install-action` CI pin from v2.87.0 to
+  v2.87.4.
+
+### Security
+
+- Remove the RUSTSEC-2026-0235 audit exception and its inactive-feature CI guard after
+  `rust_decimal` 1.43.0 removes the vulnerable rkyv 0.7 dependency path from the lockfile;
+  `cargo audit --deny warnings` now runs without advisory exceptions.
+
 ## [2.1.0] - 2026-09-06
 
 ### Added
