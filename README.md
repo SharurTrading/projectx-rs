@@ -31,7 +31,7 @@ changelog before upgrading and keep recovery around ambiguous money-moving outco
 ## Installation
 
 ```sh
-cargo add projectx-client@2
+cargo add projectx-client@3
 ```
 
 Or add the current major release directly:
