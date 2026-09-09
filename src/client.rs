@@ -54,6 +54,7 @@ pub struct Client {
     token: Arc<TokenStore>,
     rate_limits: Arc<RateLimits>,
     response_limit: usize,
+    realtime_config: crate::realtime::RealtimeConfig,
     max_retries: u32,
     retry_initial: Duration,
     retry_max: Duration,
@@ -211,6 +212,7 @@ impl Client {
             self.endpoints.clone(),
             self.realtime_http.clone(),
             Arc::clone(&self.token),
+            self.realtime_config,
         )
     }
 
@@ -1053,6 +1055,7 @@ impl Clone for Client {
             token: Arc::clone(&self.token),
             rate_limits: Arc::clone(&self.rate_limits),
             response_limit: self.response_limit,
+            realtime_config: self.realtime_config,
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
             retry_max: self.retry_max,
@@ -1136,6 +1139,7 @@ pub struct ClientBuilder {
     endpoints: Endpoints,
     timeout: Duration,
     response_limit: usize,
+    realtime_config: crate::realtime::RealtimeConfig,
     proxy: Option<String>,
     max_retries: u32,
     retry_initial: Duration,
@@ -1150,6 +1154,7 @@ impl ClientBuilder {
             endpoints: Endpoints::default(),
             timeout: DEFAULT_TIMEOUT,
             response_limit: DEFAULT_RESPONSE_LIMIT,
+            realtime_config: crate::realtime::RealtimeConfig::default(),
             proxy: None,
             max_retries: DEFAULT_MAX_RETRIES,
             retry_initial: DEFAULT_RETRY_INITIAL,
@@ -1173,6 +1178,43 @@ impl ClientBuilder {
     /// Sets the maximum decoded HTTP response size.
     pub fn response_limit(mut self, bytes: usize) -> Self {
         self.response_limit = bytes;
+        self
+    }
+
+    /// Sets queued real-time events per hub (default 65,536).
+    ///
+    /// This is a stalled-consumer signal, not a subscription quota. Saturation
+    /// retains a nonterminal gap; the socket and invocation completions continue.
+    /// Increase it for larger bursts or a slower consumer. Build rejects zero or
+    /// values outside Tokio's representable permit range; there is no SDK ceiling.
+    pub fn realtime_event_capacity(mut self, capacity: usize) -> Self {
+        self.realtime_config.event_capacity = capacity;
+        self
+    }
+
+    /// Sets queued outbound real-time messages per hub (default 4,096).
+    /// A full queue refuses new admission with `SendQueueFull` without sending.
+    /// Build rejects zero or values outside Tokio's representable permit range.
+    pub fn realtime_writer_capacity(mut self, capacity: usize) -> Self {
+        self.realtime_config.writer_capacity = capacity;
+        self
+    }
+
+    /// Sets simultaneous incomplete real-time invocations per hub (default 4,096).
+    /// Completed subscriptions consume no slots and have no total-count limit.
+    /// A full set refuses admission with `PendingInvocationCapacity` before sending.
+    /// Build rejects zero or values outside Tokio's representable permit range.
+    pub fn realtime_pending_invocation_capacity(mut self, capacity: usize) -> Self {
+        self.realtime_config.pending_capacity = capacity;
+        self
+    }
+
+    /// Sets the real-time invocation completion wait after enqueue (default 15s).
+    /// A deadline includes writer-queue time, preserves an unknown outcome and
+    /// never closes the socket or resends the request. Build rejects zero or
+    /// durations outside Tokio's representable clock range.
+    pub fn realtime_invocation_timeout(mut self, timeout: Duration) -> Self {
+        self.realtime_config.invocation_timeout = timeout;
         self
     }
 
@@ -1226,6 +1268,7 @@ impl ClientBuilder {
     /// Returns an error for zero timeout/response limits, an invalid or unsafe
     /// proxy combination, or a transport configuration failure.
     pub fn build(self) -> Result<Client, Error> {
+        self.realtime_config.validate()?;
         if self.timeout.is_zero()
             || self.response_limit == 0
             || self.retry_initial.is_zero()
@@ -1290,6 +1333,7 @@ impl ClientBuilder {
             token: Arc::new(TokenStore::default()),
             rate_limits: Arc::new(RateLimits::new(self.rate_limits)),
             response_limit: self.response_limit,
+            realtime_config: self.realtime_config,
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
             retry_max: self.retry_max,
