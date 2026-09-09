@@ -12,6 +12,13 @@ first public release.
 
 ### Breaking changes for 3.0.0
 
+- Make event, writer and pending-invocation capacities and invocation deadlines configurable on
+  `ClientBuilder`. Remove the estimated event-memory budget and unsupported WebSocket frame,
+  message and outbound invocation ceilings (`OutboundMessageTooLarge` is removed). Raise the
+  default burst buffers to 65,536 events and 4,096 outstanding control messages/invocations;
+  completed subscriptions have no count limit. Yield while decoding coalesced records so a
+  ready consumer can drain a batch larger than its queue on a current-thread runtime.
+
 - Preserve healthy real-time sockets across event overflow, malformed SignalR records, invocation
   cancellation, completion timeout and ordinary inactivity. Gaps are nonterminal and consumers
   acknowledge them while connected instead of waiting for a disconnect/reconnect cycle.

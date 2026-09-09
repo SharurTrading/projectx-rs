@@ -4,8 +4,8 @@
 //! Bounded data delivery with retained continuity and lifecycle boundaries.
 
 use super::{
-    Arc, AtomicBool, AtomicUsize, EVENT_BYTE_BUDGET, Notify, Ordering, ParkingMutex, RealtimeError,
-    RealtimeEvent, fmt, mpsc,
+    Arc, AtomicBool, AtomicUsize, Notify, Ordering, ParkingMutex, RealtimeError, RealtimeEvent,
+    fmt, mpsc,
 };
 
 /// Identity of one ready socket, scoped to its owning real-time client.
@@ -120,13 +120,6 @@ impl EventFlow {
             return Ok(PublishOutcome::StaleGeneration);
         }
         if state.overflow.is_some() {
-            return self.retain_overflow(&mut state, generation, event);
-        }
-        let queued_weight = self.queued_weight.load(Ordering::Acquire);
-        if queued_weight
-            .checked_add(weight)
-            .is_none_or(|total| total > EVENT_BYTE_BUDGET)
-        {
             return self.retain_overflow(&mut state, generation, event);
         }
         self.queued_weight.fetch_add(weight, Ordering::AcqRel);

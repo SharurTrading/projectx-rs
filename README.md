@@ -213,7 +213,7 @@ for 15 seconds ends that failed socket. Ordinary application-data silence has no
 
 ### Transport gaps and `acknowledge_transport_gap`
 
-Real-time data delivery is bounded. Queue or byte-budget saturation and malformed SignalR records
+Real-time data delivery is bounded. Queue saturation and malformed SignalR records
 latch one nonterminal `TransportGap`. The accepted prefix is delivered first; the gap then reaches
 the consumer without waiting for disconnection. Later application data is discarded with that
 explicit signal until the consumer installs its recovery boundary and calls
@@ -227,6 +227,9 @@ An affected application projection must reconcile or obtain a fresh snapshot bef
 continuity. A continuity gap alone does not prove physical subscriptions ended.
 
 ### Migrating from 2.x
+
+Version 3 removes `RealtimeError::OutboundMessageTooLarge` and the corresponding arbitrary
+invocation-size ceiling. Configure queue capacities on `ClientBuilder` for your workload.
 
 Version 3 removes the previous implicit disconnect after queue overflow, invocation timeout,
 invocation cancellation and inactivity. Consumers must acknowledge nonterminal gaps while their
@@ -314,17 +317,31 @@ Cancellation cannot make a submitted mutation safe to repeat. If an application 
 future after polling has begun, it must treat the outcome as potentially ambiguous and reconcile
 provider state before retrying, just as it would after `Error::AmbiguousMutation`.
 
-The current built-in real-time limits are 256 outbound messages, 256 pending invocations, and 512
-received events. The event queue also has a 32 MiB aggregate decoded-memory charge: each JSON event
-costs 256 bytes plus 16 times its encoded frame length, so the count limit cannot multiply the
-maximum frame size into an unsafe allocation. One fixed-size terminal lifecycle event is reserved
-outside that data budget so a gap always ends with `Disconnected`. An outbound invocation may encode
-to at most 64 KiB. WebSocket messages and individual frames are capped at 1 MiB and 256 KiB, with
-64 KiB read/write buffers and a 256 KiB maximum write buffer. Connection, handshake,
-invocation-completion, and close waits are bounded at 10, 10, 15, and 5 seconds respectively. The
-client sends a SignalR ping after 15 seconds without an outbound frame; the watchdog checks every 5
-seconds and treats 30 seconds without inbound transport activity as stale. These are client
-implementation limits, not provider guarantees.
+Real-time queue sizes are configurable per hub through `ClientBuilder`:
+
+| Setting | Default | Meaning at saturation |
+| --- | --- | --- |
+| `realtime_event_capacity` | 65,536 events | Retain a nonterminal gap after the accepted prefix; keep the socket running. |
+| `realtime_writer_capacity` | 4,096 messages | Refuse the new invocation with `SendQueueFull` before sending it. |
+| `realtime_pending_invocation_capacity` | 4,096 invocations | Refuse new admission with `PendingInvocationCapacity` until a pending call settles. |
+| `realtime_invocation_timeout` | 15 seconds | End only the caller's wait, retaining an unknown outcome after admission. |
+
+These are burst buffers and bounds on outstanding control work, not limits on active subscriptions.
+Completed subscriptions occupy no pending slots. Choose capacities for the expected burst size and
+consumer delay; the SDK imposes no maximum below Tokio's representable permit range. The defaults
+pass synthetic fixtures with 1,024 concurrent subscriptions and a 20,000-event, multi-megabyte burst
+while the consumer is paused. Coalesced records yield during decoding so a running consumer can
+also drain a batch larger than its queue, including on a current-thread runtime.
+
+There is no estimated decoded-memory budget and no arbitrary WebSocket frame, message or outbound
+invocation byte ceiling. Payloads consume their actual memory; queue saturation still reports a
+continuity gap. Read/write buffers use 64 KiB chunks, and the single writer flushes each dequeued
+message. Retained gap and lifecycle notifications remain independent of the data queue.
+
+Connection, handshake and close waits are 10, 10 and 5 seconds. Invocation waits include writer-queue
+time and can be increased for gateways or batches requiring more than the default 15 seconds.
+SignalR keepalives and active WebSocket ping/pong probes continue as described above; ordinary
+silence never triggers a disconnect. REST rate budgets remain separately provider-defined.
 
 `ClientBuilder` also supports custom provider endpoints, HTTP timeouts, response-size limits,
 explicit proxy configuration, retry counts, and retry delays. The client deliberately ignores

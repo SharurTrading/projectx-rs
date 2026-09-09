@@ -6,7 +6,6 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    io::{self, Write as _},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -42,24 +41,12 @@ use crate::{AccountId, ContractId, Endpoints, Error as ClientError, token::Token
 
 const SIGNALR_TERMINATOR: char = '\u{001e}';
 const SIGNALR_PING: &str = "{\"type\":6}\u{001e}";
-const WRITER_CAPACITY: usize = 256;
-const EVENT_CAPACITY: usize = 512;
-const PENDING_INVOCATION_CAPACITY: usize = WRITER_CAPACITY;
-const EVENT_BYTE_BUDGET: usize = 32 * 1_024 * 1_024;
-const EVENT_DECODED_WEIGHT_MULTIPLIER: usize = 16;
-const EVENT_BASE_WEIGHT: usize = 256;
-// ProjectX messages are normally small JSON frames. These ceilings leave ample room for
-// provider-side batching while preventing a peer or stalled socket from growing memory without
-// bound. The write ceiling accommodates the target buffer plus multiple maximum-size invocations.
+// Fixed I/O chunk sizes are throughput choices, not message-size ceilings.
 const WEBSOCKET_READ_BUFFER_SIZE: usize = 64 * 1_024;
 const WEBSOCKET_WRITE_BUFFER_SIZE: usize = 64 * 1_024;
-const WEBSOCKET_MAX_WRITE_BUFFER_SIZE: usize = 256 * 1_024;
-const WEBSOCKET_MAX_MESSAGE_SIZE: usize = 1_024 * 1_024;
-const WEBSOCKET_MAX_FRAME_SIZE: usize = 256 * 1_024;
-const MAX_OUTBOUND_INVOCATION_SIZE: usize = 64 * 1_024;
+const EVENT_BASE_WEIGHT: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 // Active WebSocket liveness: probe every 15 seconds; one unanswered probe
@@ -77,12 +64,6 @@ struct PendingEntry {
 
 type PendingInvocations = Arc<ParkingMutex<BTreeMap<String, PendingEntry>>>;
 
-struct BoundedBuffer {
-    bytes: Vec<u8>,
-    limit: usize,
-    exceeded: bool,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OutboundInvocation<'a> {
@@ -91,40 +72,6 @@ struct OutboundInvocation<'a> {
     invocation_id: &'a str,
     target: &'a str,
     arguments: &'a [Value],
-}
-
-impl BoundedBuffer {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(limit.min(4 * 1_024)),
-            limit,
-            exceeded: false,
-        }
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl io::Write for BoundedBuffer {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self
-            .bytes
-            .len()
-            .checked_add(buffer.len())
-            .is_none_or(|length| length > self.limit)
-        {
-            self.exceeded = true;
-            return Err(io::Error::other("bounded SignalR message limit reached"));
-        }
-        self.bytes.extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 /// `ProjectX` real-time hub.
@@ -392,7 +339,9 @@ pub enum RealtimeEvent {
     Message(Value),
 }
 
+mod config;
 mod event_flow;
+pub(crate) use config::RealtimeConfig;
 mod session_handle;
 use event_flow::{EventEnvelope, EventFlow, PublishOutcome};
 pub use event_flow::{RealtimeEventReceiver, RealtimeGeneration, RealtimeMessage};
@@ -466,12 +415,6 @@ pub enum RealtimeError {
     /// A monotonic transport identifier reached its numeric bound.
     #[error("real-time transport identifier capacity is exhausted")]
     IdentifierCapacity,
-    /// An invocation exceeded the bounded outbound message size.
-    #[error("real-time invocation exceeds the {max_bytes}-byte outbound limit")]
-    OutboundMessageTooLarge {
-        /// Maximum encoded invocation size, including the `SignalR` terminator.
-        max_bytes: usize,
-    },
     /// A `SignalR` invocation was rejected by the provider.
     #[error("SignalR invocation `{target}` was rejected")]
     InvocationRejected {
@@ -509,6 +452,7 @@ struct RealtimeInner {
     endpoints: Endpoints,
     http: reqwest::Client,
     token: Arc<TokenStore>,
+    config: RealtimeConfig,
     lifecycle: ParkingMutex<Lifecycle>,
     lifecycle_changed: Notify,
     generation: AtomicU64,
@@ -630,8 +574,9 @@ impl RealtimeClient {
         endpoints: Endpoints,
         http: reqwest::Client,
         token: Arc<TokenStore>,
+        config: RealtimeConfig,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
+        let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
         let event_flow = EventFlow::new();
         Self {
             inner: Arc::new(RealtimeInner {
@@ -639,6 +584,7 @@ impl RealtimeClient {
                 endpoints,
                 http,
                 token,
+                config,
                 lifecycle: ParkingMutex::new(Lifecycle::Disconnected),
                 lifecycle_changed: Notify::new(),
                 generation: AtomicU64::new(0),
@@ -1027,7 +973,7 @@ impl RealtimeInner {
         };
 
         let (write, read) = stream.split();
-        let (writer, writer_rx) = mpsc::channel(WRITER_CAPACITY);
+        let (writer, writer_rx) = mpsc::channel(self.config.writer_capacity);
         let start = CancellationToken::new();
         let session_cancellation = claim.cancellation.child_token();
         let writer_task = tokio::spawn(run_writer(
@@ -1381,7 +1327,7 @@ impl RealtimeInner {
         };
         send_queued(&writer, message)?;
 
-        match tokio::time::timeout(COMPLETION_TIMEOUT, reply_rx).await {
+        match tokio::time::timeout(self.config.invocation_timeout, reply_rx).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(()))) => Err(RealtimeError::InvocationRejected { target }),
             Ok(Err(_)) => Err(RealtimeError::InvocationSessionEnded { target }),
@@ -1403,7 +1349,7 @@ impl RealtimeInner {
             return Err(RealtimeError::StaleGeneration);
         }
         let mut pending = self.pending.lock();
-        if pending.len() >= PENDING_INVOCATION_CAPACITY {
+        if pending.len() >= self.config.pending_capacity {
             return Err(RealtimeError::PendingInvocationCapacity);
         }
         pending.insert(
@@ -1416,9 +1362,20 @@ impl RealtimeInner {
         Ok((session.generation, session.writer.clone()))
     }
 
-    fn process_text(&self, generation: u64, text: &str) -> Result<ProcessOutcome, RealtimeError> {
-        let mut records = text.split(SIGNALR_TERMINATOR).peekable();
-        while let Some(frame) = records.next() {
+    async fn process_text(
+        &self,
+        generation: u64,
+        text: &str,
+    ) -> Result<ProcessOutcome, RealtimeError> {
+        let mut records = text.split(SIGNALR_TERMINATOR).enumerate().peekable();
+        // A coalesced frame must not monopolize a current-thread executor and
+        // manufacture overflow while its consumer is ready. This is a scheduling
+        // quantum, not a record limit; even small configured queues get a turn.
+        let quantum = self.config.event_capacity.min(32);
+        while let Some((index, frame)) = records.next() {
+            if index != 0 && index % quantum == 0 {
+                tokio::task::yield_now().await;
+            }
             if records.peek().is_none() {
                 if !frame.is_empty() {
                     self.event_flow.mark_gap(generation);
@@ -1459,10 +1416,7 @@ impl RealtimeInner {
                 let invocation = SignalRInvocation::from_json(frame)?.ok_or(
                     RealtimeError::Protocol("type-1 frame was not an invocation"),
                 )?;
-                let weight = frame
-                    .len()
-                    .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
-                    .saturating_add(EVENT_BASE_WEIGHT);
+                let weight = frame.len();
                 if self.publish(generation, RealtimeEvent::Invocation(invocation), weight)?
                     == PublishOutcome::StaleGeneration
                 {
@@ -1500,10 +1454,7 @@ impl RealtimeInner {
                 return Ok(ProcessOutcome::Close);
             }
             _ => {
-                let weight = frame
-                    .len()
-                    .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
-                    .saturating_add(EVENT_BASE_WEIGHT);
+                let weight = frame.len();
                 if self.publish(generation, RealtimeEvent::Message(value), weight)?
                     == PublishOutcome::StaleGeneration
                 {
@@ -1674,9 +1625,10 @@ fn websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(WEBSOCKET_READ_BUFFER_SIZE)
         .write_buffer_size(WEBSOCKET_WRITE_BUFFER_SIZE)
-        .max_write_buffer_size(WEBSOCKET_MAX_WRITE_BUFFER_SIZE)
-        .max_message_size(Some(WEBSOCKET_MAX_MESSAGE_SIZE))
-        .max_frame_size(Some(WEBSOCKET_MAX_FRAME_SIZE))
+        // The writer flushes every dequeued message. Bounded control admission
+        // limits queued work; provider payloads have no invented byte ceilings.
+        .max_message_size(None)
+        .max_frame_size(None)
 }
 
 fn encode_invocation(
@@ -1690,23 +1642,8 @@ fn encode_invocation(
         target,
         arguments,
     };
-    let mut encoded = BoundedBuffer::new(MAX_OUTBOUND_INVOCATION_SIZE);
-    if let Err(error) = serde_json::to_writer(&mut encoded, &payload) {
-        return if encoded.exceeded {
-            Err(RealtimeError::OutboundMessageTooLarge {
-                max_bytes: MAX_OUTBOUND_INVOCATION_SIZE,
-            })
-        } else {
-            Err(RealtimeError::Encode(error))
-        };
-    }
-    if encoded.write_all(&[0x1e]).is_err() {
-        return Err(RealtimeError::OutboundMessageTooLarge {
-            max_bytes: MAX_OUTBOUND_INVOCATION_SIZE,
-        });
-    }
-    let text = String::from_utf8(encoded.into_bytes())
-        .map_err(|_| RealtimeError::Protocol("encoded invocation was not UTF-8"))?;
+    let mut text = serde_json::to_string(&payload).map_err(RealtimeError::Encode)?;
+    text.push(SIGNALR_TERMINATOR);
     Ok(Message::Text(text.into()))
 }
 
@@ -1885,7 +1822,7 @@ where
             let Some(inner) = inner.upgrade() else {
                 return Ok(());
             };
-            if inner.process_text(generation, &tail)? == ProcessOutcome::Close {
+            if inner.process_text(generation, &tail).await? == ProcessOutcome::Close {
                 return Ok(());
             }
         }
@@ -1900,7 +1837,7 @@ where
                     let Some(inner) = inner.upgrade() else {
                         return Ok(());
                     };
-                    let outcome = inner.process_text(generation, text.as_ref())?;
+                    let outcome = inner.process_text(generation, text.as_ref()).await?;
                     inner.record_activity(generation);
                     if outcome == ProcessOutcome::Close {
                         return Ok(());
@@ -1914,7 +1851,7 @@ where
                         inner.event_flow.mark_gap(generation);
                         continue;
                     };
-                    let outcome = inner.process_text(generation, text)?;
+                    let outcome = inner.process_text(generation, text).await?;
                     inner.record_activity(generation);
                     if outcome == ProcessOutcome::Close {
                         return Ok(());
@@ -2187,7 +2124,7 @@ mod tests {
             "\u{001e}",
         ] {
             assert!(matches!(
-                realtime.inner.process_text(1, batch),
+                realtime.inner.process_text(1, batch).await,
                 Ok(ProcessOutcome::Continue)
             ));
         }
@@ -2218,15 +2155,7 @@ mod tests {
             .event_flow
             .start_generation(1)
             .unwrap_or_else(|error| panic!("fixture generation must start: {error}"));
-        assert!(matches!(
-            realtime.inner.event_flow.publish(
-                &realtime.inner.event_tx,
-                1,
-                RealtimeEvent::Message(json!({"overflow": true})),
-                EVENT_BYTE_BUDGET + 1,
-            ),
-            Err(RealtimeError::EventQueueFull)
-        ));
+        realtime.inner.event_flow.mark_gap(1);
         realtime.inner.event_flow.finish_generation(1);
         release_lock.wait();
 
@@ -2405,15 +2334,7 @@ mod tests {
         let (finish_tx, finish_rx) = oneshot::channel();
         let producer_flow = Arc::clone(&flow);
         let producer = tokio::spawn(async move {
-            assert!(matches!(
-                producer_flow.publish(
-                    &events_tx,
-                    generation,
-                    RealtimeEvent::Message(json!({"sequence": 2})),
-                    EVENT_BYTE_BUDGET + 1,
-                ),
-                Err(RealtimeError::EventQueueFull)
-            ));
+            producer_flow.mark_gap(generation);
             producer_flow
                 .publish(
                     &events_tx,
@@ -2491,7 +2412,7 @@ mod tests {
             PublishOutcome::Published
         );
 
-        for weight in [EVENT_BASE_WEIGHT, EVENT_BYTE_BUDGET + 1] {
+        for weight in [EVENT_BASE_WEIGHT, usize::MAX] {
             assert_eq!(
                 flow.publish(
                     &events_tx,
@@ -2548,6 +2469,7 @@ mod tests {
             realtime
                 .inner
                 .process_text(1, "{\"type\":7,\"allowReconnect\":false}\u{001e}")
+                .await
                 .unwrap_or_else(|error| panic!("close frame must decode: {error}")),
             ProcessOutcome::Close
         );
@@ -2565,6 +2487,7 @@ mod tests {
             realtime
                 .inner
                 .process_text(2, "{\"type\":7,\"allowReconnect\":false}\u{001e}")
+                .await
                 .unwrap_or_else(|error| panic!("close frame must decode: {error}")),
             ProcessOutcome::Close
         );
@@ -2625,15 +2548,7 @@ mod tests {
             .event_flow
             .start_generation(generation)
             .unwrap_or_else(|error| panic!("generation must start: {error}"));
-        assert!(matches!(
-            realtime.inner.event_flow.publish(
-                &realtime.inner.event_tx,
-                generation,
-                RealtimeEvent::Message(json!({"overflow": true})),
-                EVENT_BYTE_BUDGET + 1,
-            ),
-            Err(RealtimeError::EventQueueFull)
-        ));
+        realtime.inner.event_flow.mark_gap(generation);
         realtime
             .inner
             .event_flow
@@ -2685,18 +2600,13 @@ mod tests {
     }
 
     #[test]
-    fn websocket_configuration_bounds_every_internal_buffer() {
+    fn websocket_configuration_accepts_large_provider_batches() {
         let config = websocket_config();
         assert_eq!(config.read_buffer_size, WEBSOCKET_READ_BUFFER_SIZE);
         assert_eq!(config.write_buffer_size, WEBSOCKET_WRITE_BUFFER_SIZE);
-        assert_eq!(
-            config.max_write_buffer_size,
-            WEBSOCKET_MAX_WRITE_BUFFER_SIZE
-        );
-        assert_eq!(config.max_message_size, Some(WEBSOCKET_MAX_MESSAGE_SIZE));
-        assert_eq!(config.max_frame_size, Some(WEBSOCKET_MAX_FRAME_SIZE));
+        assert_eq!(config.max_message_size, None);
+        assert_eq!(config.max_frame_size, None);
         assert!(config.max_write_buffer_size > config.write_buffer_size);
-        assert!(config.max_message_size >= config.max_frame_size);
     }
 
     #[test]
@@ -2793,27 +2703,19 @@ mod tests {
             panic!("invocation must encode as text");
         };
         assert!(text.ends_with(SIGNALR_TERMINATOR));
-        assert!(text.len() <= MAX_OUTBOUND_INVOCATION_SIZE);
     }
 
-    #[tokio::test]
-    async fn oversized_invocation_is_rejected_before_enqueue() {
-        let credentials = crate::Credentials::new("user", "key")
-            .unwrap_or_else(|error| panic!("fixture credentials must be valid: {error}"));
-        let client = crate::Client::builder(credentials)
-            .build()
-            .unwrap_or_else(|error| panic!("fixture client must build: {error}"));
-        let realtime = client.realtime(Hub::Market);
-        let oversized = "x".repeat(MAX_OUTBOUND_INVOCATION_SIZE);
-
-        assert!(matches!(
-            realtime
-                .invoke("Oversized", vec![Value::String(oversized)])
-                .await,
-            Err(RealtimeError::OutboundMessageTooLarge {
-                max_bytes: MAX_OUTBOUND_INVOCATION_SIZE
-            })
-        ));
+    #[test]
+    fn invocation_encoder_preserves_large_argument_batches() {
+        let payload = "x".repeat(2 * 1_024 * 1_024);
+        let message = encode_invocation("1", "Batch", &[Value::String(payload.clone())])
+            .unwrap_or_else(|error| panic!("large invocation: {error}"));
+        let Message::Text(text) = message else {
+            panic!("text invocation");
+        };
+        let value: Value = serde_json::from_str(text.trim_end_matches(SIGNALR_TERMINATOR))
+            .unwrap_or_else(|error| panic!("decode: {error}"));
+        assert_eq!(value["arguments"][0], payload);
     }
     #[test]
     fn dropping_ready_client_outside_a_runtime_joins_on_its_original_runtime() {

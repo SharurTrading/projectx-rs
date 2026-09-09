@@ -24,14 +24,20 @@ use tokio_tungstenite::{
 const TERMINATOR: char = '\u{001e}';
 
 fn fixture_client(http: &MockServer, realtime_address: std::net::SocketAddr) -> Client {
+    fixture_builder(http, realtime_address)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture client must build: {error}"))
+}
+
+fn fixture_builder(
+    http: &MockServer,
+    realtime_address: std::net::SocketAddr,
+) -> projectx_client::ClientBuilder {
     let credentials = Credentials::new("synthetic-user", "synthetic-key")
         .unwrap_or_else(|error| panic!("synthetic credentials must be valid: {error}"));
     let endpoints = Endpoints::custom(&http.base_url(), &format!("http://{realtime_address}"))
         .unwrap_or_else(|error| panic!("fixture endpoints must be valid: {error}"));
-    Client::builder(credentials)
-        .endpoints(endpoints)
-        .build()
-        .unwrap_or_else(|error| panic!("fixture client must build: {error}"))
+    Client::builder(credentials).endpoints(endpoints)
 }
 
 // `accept_hdr_async` fixes the callback's large HTTP response error type; this
@@ -849,6 +855,15 @@ async fn cancelled_admitted_invocation_preserves_the_generation() {
 
 #[tokio::test]
 async fn invocation_timeout_preserves_the_ambiguous_generation() {
+    exercise_invocation_deadline(None).await;
+}
+
+#[tokio::test]
+async fn configured_invocation_deadline_preserves_the_socket() {
+    exercise_invocation_deadline(Some(Duration::from_secs(2))).await;
+}
+
+async fn exercise_invocation_deadline(deadline: Option<Duration>) {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -866,7 +881,11 @@ async fn invocation_timeout_preserves_the_ambiguous_generation() {
     let (seen_tx, seen_rx) = oneshot::channel();
     let server = spawn_uncompleted_invocation_server(listener, seen_tx);
 
-    let client = fixture_client(&http, address);
+    let mut builder = fixture_builder(&http, address);
+    if let Some(deadline) = deadline {
+        builder = builder.realtime_invocation_timeout(deadline);
+    }
+    let client = builder.build().unwrap_or_else(|e| panic!("client: {e}"));
     authenticate_fixture(&client).await;
     let realtime = client.realtime(Hub::Market);
     let mut events = realtime
@@ -884,10 +903,12 @@ async fn invocation_timeout_preserves_the_ambiguous_generation() {
         .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
 
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::advance(deadline.unwrap_or(Duration::from_secs(15)) + Duration::from_secs(1))
+        .await;
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
+    assert!(task.is_finished(), "configured deadline was not honored");
     assert!(matches!(
         task.await
             .unwrap_or_else(|error| panic!("invocation task must join: {error}")),
@@ -1269,7 +1290,10 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
             }
         }
     });
-    let client = fixture_client(&http, address);
+    let client = fixture_builder(&http, address)
+        .realtime_event_capacity(512)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
     authenticate_fixture(&client).await;
     let realtime = client.realtime(Hub::Market);
     let mut events = realtime
@@ -1512,4 +1536,245 @@ async fn failed_probe_reconnects_with_a_fresh_generation() {
     assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
     assert!(realtime.disconnect().await.is_ok());
     server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+async fn load_fixture() -> (MockServer, Client, TcpListener) {
+    let http = MockServer::start_async().await;
+    http.mock_async(|when, then| {
+        when.method(POST).path("/api/Auth/loginKey");
+        then.status(200)
+            .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+    })
+    .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    (http, client, listener)
+}
+
+#[tokio::test]
+async fn default_transport_preserves_twenty_thousand_event_burst_on_one_socket() {
+    exercise_large_burst(false).await;
+}
+
+#[tokio::test]
+async fn small_queue_drains_a_large_single_frame_with_a_running_consumer() {
+    exercise_large_burst(true).await;
+}
+
+async fn exercise_large_burst(consume_immediately: bool) {
+    use std::fmt::Write as _;
+    let (http, mut client, listener) = load_fixture().await;
+    if consume_immediately {
+        client = fixture_builder(
+            &http,
+            listener
+                .local_addr()
+                .unwrap_or_else(|e| panic!("address: {e}")),
+        )
+        .realtime_event_capacity(64)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+        authenticate_fixture(&client).await;
+    }
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let Some(Ok(Message::Text(request))) = socket.next().await else {
+            panic!("request");
+        };
+        let request: Value = serde_json::from_str(request.trim_end_matches(TERMINATOR))
+            .unwrap_or_else(|e| panic!("request JSON: {e}"));
+        let mut records = String::new();
+        for sequence in 0..20_000 {
+            write!(
+                records,
+                "{}{TERMINATOR}",
+                json!({"type":42,"sequence":sequence,"payload":"x".repeat(256)})
+            )
+            .unwrap_or_else(|e| panic!("format: {e}"));
+        }
+        write!(
+            records,
+            "{}{TERMINATOR}",
+            json!({"type":3,"invocationId":request["invocationId"]})
+        )
+        .unwrap_or_else(|e| panic!("format: {e}"));
+        socket
+            .send(Message::Text(records.into()))
+            .await
+            .unwrap_or_else(|e| panic!("send: {e}"));
+        assert!(wait_for_client_close(&mut socket).await);
+    });
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    let handle = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    let mut completion = tokio::spawn(async move { handle.invoke("Burst", Vec::new()).await });
+    if !consume_immediately {
+        // Deliberately pause the consumer until all records and completion arrived.
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), &mut completion).await,
+            Ok(Ok(Ok(())))
+        ));
+    }
+    for sequence in 0..20_000 {
+        let event = events
+            .recv_message()
+            .await
+            .unwrap_or_else(|| panic!("event {sequence}"));
+        assert_eq!(event.generation, first.generation);
+        let RealtimeEvent::Message(value) = event.event else {
+            panic!("burst lost continuity at {sequence}");
+        };
+        assert_eq!(value["sequence"], sequence);
+    }
+    if consume_immediately {
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), completion).await,
+            Ok(Ok(Ok(())))
+        ));
+    }
+    assert!(realtime.is_connected());
+    assert!(realtime.disconnect().await.is_ok());
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn default_transport_accepts_a_thousand_concurrent_subscriptions() {
+    exercise_concurrent_subscriptions(1_024, false).await;
+}
+
+#[tokio::test]
+async fn configured_capacity_accepts_five_thousand_concurrent_subscriptions() {
+    exercise_concurrent_subscriptions(5_000, true).await;
+}
+
+async fn exercise_concurrent_subscriptions(count: usize, configure: bool) {
+    use std::collections::BTreeSet;
+    let (http, mut client, listener) = load_fixture().await;
+    if configure {
+        client = fixture_builder(
+            &http,
+            listener
+                .local_addr()
+                .unwrap_or_else(|e| panic!("address: {e}")),
+        )
+        .realtime_writer_capacity(8_192)
+        .realtime_pending_invocation_capacity(8_192)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+        authenticate_fixture(&client).await;
+        client = client.clone(); // Hub configuration follows REST-client clones.
+    }
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let mut ids = BTreeSet::new();
+        // No completion until all requests are admitted: exercise actual concurrency.
+        for _ in 0..count {
+            let Some(Ok(Message::Text(request))) = socket.next().await else {
+                panic!("subscription");
+            };
+            let request: Value = serde_json::from_str(request.trim_end_matches(TERMINATOR))
+                .unwrap_or_else(|e| panic!("request JSON: {e}"));
+            assert_eq!(request["target"], "SubscribeContractQuotes");
+            assert!(
+                ids.insert(
+                    request["invocationId"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("identity"))
+                        .to_owned()
+                )
+            );
+        }
+        for id in ids {
+            let record = format!("{}{TERMINATOR}", json!({"type":3,"invocationId":id}));
+            socket
+                .send(Message::Text(record.into()))
+                .await
+                .unwrap_or_else(|e| panic!("complete: {e}"));
+        }
+        assert!(wait_for_client_close(&mut socket).await);
+    });
+    let realtime = client.realtime(Hub::Market);
+    assert!(realtime.connect().await.is_ok());
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    let generation = session.generation();
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..count {
+        let handle = session.clone();
+        tasks.spawn(async move {
+            let contract = ContractId::new(format!("CON.F.SYNTHETIC.{index}"))
+                .unwrap_or_else(|e| panic!("contract: {e}"));
+            handle.subscribe_contract_quotes(&contract).await
+        });
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(result) = tasks.join_next().await {
+            assert!(matches!(result, Ok(Ok(()))), "{result:?}");
+        }
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "concurrent subscription batch did not complete"
+    );
+    assert_eq!(
+        realtime
+            .session()
+            .unwrap_or_else(|e| panic!("session: {e}"))
+            .generation(),
+        generation
+    );
+    assert!(realtime.disconnect().await.is_ok());
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[test]
+fn invalid_realtime_queue_and_deadline_settings_fail_before_runtime_construction() {
+    fn builder() -> projectx_client::ClientBuilder {
+        Client::builder(
+            Credentials::new("synthetic", "synthetic")
+                .unwrap_or_else(|e| panic!("credentials: {e}")),
+        )
+    }
+    for capacity in [0, usize::MAX] {
+        assert!(builder().realtime_event_capacity(capacity).build().is_err());
+        assert!(
+            builder()
+                .realtime_writer_capacity(capacity)
+                .build()
+                .is_err()
+        );
+        assert!(
+            builder()
+                .realtime_pending_invocation_capacity(capacity)
+                .build()
+                .is_err()
+        );
+    }
+    for timeout in [Duration::ZERO, Duration::MAX] {
+        assert!(
+            builder()
+                .realtime_invocation_timeout(timeout)
+                .build()
+                .is_err()
+        );
+    }
 }
