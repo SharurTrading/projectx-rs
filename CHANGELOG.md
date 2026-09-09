@@ -10,6 +10,20 @@ first public release.
 
 ## [Unreleased]
 
+### Breaking changes for 3.0.0
+
+- Preserve healthy real-time sockets across event overflow, malformed SignalR records, invocation
+  cancellation, completion timeout and ordinary inactivity. Gaps are nonterminal and consumers
+  acknowledge them while connected instead of waiting for a disconnect/reconnect cycle.
+- Add `RealtimeGeneration`, `RealtimeMessage`, `recv_message()` and generation-scoped
+  `RealtimeSession` admission. A stale session refuses before enqueueing; unknown calls are never
+  automatically resent.
+- Join both socket producers before publishing their disconnected boundary. Retain ordered
+  lifecycle notifications when the data queue is full and keep completions/keepalives flowing
+  while data admission awaits gap acknowledgement.
+- Preserve the caller’s Connect instruction after remote close. Active WebSocket probes detect
+  a failed ping/pong exchange; ordinary market-data silence never expires a connection.
+
 ## [2.1.0] - 2026-09-06
 
 ### Added

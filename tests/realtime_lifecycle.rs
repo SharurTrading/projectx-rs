@@ -174,6 +174,16 @@ fn spawn_uncompleted_invocation_server(
                 Ok(Message::Text(frame)) => {
                     let payload: Value = serde_json::from_str(frame.trim_end_matches(TERMINATOR))
                         .unwrap_or_else(|error| panic!("invocation fixture must be JSON: {error}"));
+                    if payload.get("target").and_then(Value::as_str) == Some("Healthy") {
+                        let completion =
+                            json!({"type": 3, "invocationId": payload["invocationId"]});
+                        socket
+                            .send(Message::Text(format!("{completion}{TERMINATOR}").into()))
+                            .await
+                            .unwrap_or_else(|error| {
+                                panic!("healthy completion must send: {error}")
+                            });
+                    }
                     if payload.get("type").and_then(Value::as_u64) == Some(1)
                         && let Some(seen_tx) = seen_tx.take()
                     {
@@ -247,6 +257,9 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
         Some(RealtimeEvent::Connected)
     ));
 
+    let old_session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("old session: {e}"));
     client
         .validate_session()
         .await
@@ -265,6 +278,17 @@ async fn reconnect_snapshots_rotated_token_and_requires_subscription_replay() {
 
     let contract = ContractId::new("CON.F.US.MNQ.M26")
         .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    assert!(matches!(
+        old_session.subscribe_contract_trades(&contract).await,
+        Err(RealtimeError::StaleGeneration)
+    ));
+    assert_ne!(
+        old_session.generation(),
+        realtime
+            .session()
+            .unwrap_or_else(|e| panic!("new session: {e}"))
+            .generation()
+    );
     realtime
         .subscribe_contract_trades(&contract)
         .await
@@ -773,7 +797,7 @@ async fn websocket_upgrade_has_a_bounded_timeout() {
 }
 
 #[tokio::test]
-async fn cancelled_admitted_invocation_ends_the_generation() {
+async fn cancelled_admitted_invocation_preserves_the_generation() {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -809,11 +833,11 @@ async fn cancelled_admitted_invocation_ends_the_generation() {
         .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
     task.abort();
     assert!(task.await.is_err());
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
-        Ok(Some(RealtimeEvent::Disconnected))
-    ));
-    assert!(!realtime.is_connected());
+    assert!(
+        realtime.is_connected(),
+        "cancelling one invocation must preserve its socket"
+    );
+    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
     realtime
         .disconnect()
         .await
@@ -824,7 +848,7 @@ async fn cancelled_admitted_invocation_ends_the_generation() {
 }
 
 #[tokio::test]
-async fn invocation_timeout_ends_the_ambiguous_generation() {
+async fn invocation_timeout_preserves_the_ambiguous_generation() {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -869,13 +893,18 @@ async fn invocation_timeout_ends_the_ambiguous_generation() {
             .unwrap_or_else(|error| panic!("invocation task must join: {error}")),
         Err(RealtimeError::InvocationTimedOut { .. })
     ));
+    assert!(
+        realtime.is_connected(),
+        "one completion deadline must preserve its socket"
+    );
+    tokio::time::resume();
+    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
     realtime
         .disconnect()
         .await
         .unwrap_or_else(|error| panic!("timed-out generation cleanup must be idempotent: {error}"));
     assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
     assert!(!realtime.is_connected());
-    tokio::time::resume();
     server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
@@ -1191,4 +1220,296 @@ async fn ping_and_pong_traffic_keeps_the_session_live() {
         tokio::time::timeout(Duration::from_secs(2), server).await,
         Ok(Ok(()))
     ));
+}
+
+async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(text.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|e| panic!("request: {e}"));
+                    let Some(id) = value.get("invocationId") else {
+                        continue;
+                    };
+                    let completion = json!({"type":3,"invocationId":id});
+                    let data = if value["target"] == "Trigger" {
+                        records.clone()
+                    } else {
+                        format!("{}{TERMINATOR}", json!({"type":42,"after":true}))
+                    };
+                    socket
+                        .send(Message::Text(
+                            format!("{data}{completion}{TERMINATOR}").into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|e| panic!("response: {e}"));
+                }
+                Message::Close(_) => {
+                    let _ = socket.flush().await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    assert_eq!(first.event, RealtimeEvent::Connected);
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert_eq!(session.generation(), first.generation);
+    // Completion must pass even though earlier data saturated or broke delivery.
+    assert!(session.invoke("Trigger", Vec::new()).await.is_ok());
+    for _ in 0..expected_prefix {
+        let message = events
+            .recv_message()
+            .await
+            .unwrap_or_else(|| panic!("prefix"));
+        assert_eq!(message.generation, first.generation);
+        assert!(matches!(message.event, RealtimeEvent::Message(_)));
+    }
+    let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
+    assert_eq!(gap.generation, first.generation);
+    assert_eq!(gap.event, RealtimeEvent::TransportGap);
+    assert!(realtime.is_connected());
+    events.acknowledge_transport_gap();
+    assert!(session.invoke("Healthy", Vec::new()).await.is_ok());
+    let after = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("continued data"));
+    assert_eq!(after.generation, first.generation);
+    assert_eq!(
+        after.event,
+        RealtimeEvent::Message(json!({"type":42,"after":true}))
+    );
+    assert!(realtime.disconnect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn malformed_record_keeps_socket_and_processes_later_completion_in_batch() {
+    exercise_nonterminal_gap(
+        "{broken}\u{001e}{\"type\":3,\"invocationId\":null}\u{001e}".to_owned(),
+        0,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn saturated_events_keep_socket_and_process_completions_until_gap_ack() {
+    use std::fmt::Write as _;
+    let mut records = String::new();
+    for sequence in 0..513 {
+        write!(
+            records,
+            "{}{}",
+            json!({"type":42,"sequence":sequence}),
+            TERMINATOR
+        )
+        .unwrap_or_else(|e| panic!("fixture format: {e}"));
+    }
+    exercise_nonterminal_gap(records, 512).await;
+}
+
+#[tokio::test]
+async fn quiet_socket_survives_inactivity_watchdog_interval() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let (seen, _seen) = oneshot::channel();
+    let server = spawn_uncompleted_invocation_server(listener, seen);
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    assert!(realtime.connect().await.is_ok());
+    let generation = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"))
+        .generation();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(90)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    assert_eq!(
+        realtime
+            .session()
+            .unwrap_or_else(|e| panic!("quiet session: {e}"))
+            .generation(),
+        generation
+    );
+    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.disconnect().await.is_ok());
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn failed_active_ping_ends_socket_and_explicit_disconnect_cancels_retry() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let (ready, ready_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let _ = ready.send(());
+        // Hold TCP open without reading: an active WebSocket probe gets no pong.
+        let _ = release_rx.await;
+        drop(socket);
+        // User Disconnect must have cancelled recovery, so there is no new socket.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
+    ready_rx.await.unwrap_or_else(|e| panic!("ready: {e}"));
+    tokio::time::pause();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        if !realtime.is_connected() {
+            break;
+        }
+    }
+    // The active probe deadline, rather than ordinary silence, ends this socket.
+    assert!(!realtime.is_connected());
+    assert!(realtime.disconnect().await.is_ok());
+    tokio::time::advance(Duration::from_mins(1)).await;
+    tokio::time::resume();
+    let _ = release.send(());
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn failed_probe_reconnects_with_a_fresh_generation() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let (release, release_rx) = oneshot::channel();
+    // The first socket stops reading after handshake, leaving the active probe unanswered.
+    let server = spawn_reconnect_server(listener, release_rx);
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let old = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
+    tokio::time::pause();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        if !realtime.is_connected() {
+            break;
+        }
+    }
+    assert!(!realtime.is_connected());
+    tokio::time::resume();
+    let ended = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("ended"));
+    assert_eq!(ended.generation, old.generation());
+    assert_eq!(ended.event, RealtimeEvent::Disconnected);
+    let _ = release.send(());
+    let replacement = tokio::time::timeout(Duration::from_secs(8), events.recv_message())
+        .await
+        .unwrap_or_else(|e| panic!("reconnect deadline: {e}"))
+        .unwrap_or_else(|| panic!("replacement"));
+    assert_eq!(replacement.event, RealtimeEvent::Reconnected);
+    assert_ne!(replacement.generation, old.generation());
+    assert!(matches!(
+        old.invoke("Stale", Vec::new()).await,
+        Err(RealtimeError::StaleGeneration)
+    ));
+    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.disconnect().await.is_ok());
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
 }

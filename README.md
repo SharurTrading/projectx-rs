@@ -38,7 +38,7 @@ Or add the current major release directly:
 
 ```toml
 [dependencies]
-projectx-client = "2"
+projectx-client = "3"
 ```
 
 The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
@@ -185,56 +185,55 @@ failure or HTTP 429 retains the existing session.
 
 ### Automatic reconnect and subscription replay
 
-After `connect()` completes the SignalR handshake, a watchdog monitors connection and activity
-state. A dropped or stale connection is replaced automatically with a freshly authenticated
-handshake. Reconnect attempts are serialized, so concurrent failure signals cannot create competing
-sessions.
-
-The transport deliberately does not own subscription truth. When a replacement handshake succeeds,
-it emits `RealtimeEvent::Reconnected`; the application must then replay its canonical subscription
-set. Keep that set outside `RealtimeClient` and make replay idempotent. Calling `disconnect()` is an
-explicit shutdown: it stops the watchdog, performs a bounded close handshake, and does not trigger
-automatic reconnect.
-
-Connection generations are fenced as well. A late task or reconnect attempt from a superseded
-session cannot publish readiness, complete an invocation, or tear down the replacement session. A
-reader or writer failure closes the whole generation, and dropping the final real-time client handle
+A completed SignalR handshake establishes a socket generation. Actual reader/writer failure or
+remote closure may reconnect while Connect remains requested; ordinary silence never closes a
+healthy socket. Reconnect attempts are serialized and snapshot the current authentication token.
+Explicit `disconnect()` disables reconnect, closes and joins socket tasks; cancelling the caller's
+close future does not cancel their tracked teardown. Dropping the last `RealtimeClient` owner
 cancels its background work.
 
-An invocation whose completion times out is ambiguous: the provider may have applied a subscription
-change before its acknowledgement was lost. Cancellation after the invocation enters the writer
-queue has the same ambiguity. In either case the client ends that connection generation; after
-`Reconnected`, replay the canonical subscription set instead of guessing which operation applied.
+The client owns no subscription truth. After `RealtimeEvent::Reconnected`, replay the application's
+current subscriptions. Use `RealtimeClient::session()` to capture a `RealtimeSession` before spawning
+subscription work. Its typed helpers admit only to that exact socket and return `StaleGeneration`
+before enqueueing if it has been replaced. A session handle has no disconnect authority and does not
+keep the client owner alive. Use `RealtimeEventReceiver::recv_message()` to receive each event with
+its `RealtimeGeneration`; `Disconnected` proves both of that generation's socket tasks have stopped.
+Late work cannot publish to, settle requests on, or close a replacement generation.
 
-SignalR control traffic remains internal: the client sends a type-6 SignalR ping after 15 seconds
-without an outbound frame, while provider keepalive messages refresh inbound liveness without
-entering the application event queue. A provider close message ends the active generation, and
-automatic reconnect continues only when that message explicitly sets `allowReconnect` to `true`;
-terminal provider closes therefore cannot create a reconnect loop.
+Invocation timeout or cancellation after queue admission remains ambiguous: the provider may have
+applied the operation. Only that invocation's pending slot is reclaimed; the socket remains open.
+Do not blindly retry an uncertain mutation or infer that an uncertain subscription is absent.
+
+SignalR control traffic remains internal. The client sends a type-6 keepalive after 15 seconds
+without an outbound frame and continues processing provider keepalives and invocation completions
+while application event delivery is fenced. A valid provider close ends the active generation;
+the caller’s Connect instruction remains active across remote closure. Only explicit Disconnect
+or dropping the owner cancels recovery. WebSocket probes run every 15 seconds; an unanswered probe
+for 15 seconds ends that failed socket. Ordinary application-data silence has no deadline.
 
 ### Transport gaps and `acknowledge_transport_gap`
 
-Real-time delivery is bounded. If the consumer falls behind far enough that a provider frame cannot
-enter the event queue, continuing with a partial stream would make an order book, position mirror,
-or other projection silently incorrect. The client therefore disconnects, pauses automatic
-reconnect, ends the overflowed connection generation, drains every event that was already accepted,
-delivers that generation's final `Disconnected` event, and only then emits one ordered
-`RealtimeEvent::TransportGap` marker. A generation fence prevents late producer work from entering
-the queue while this ordered tail is delivered.
+Real-time data delivery is bounded. Queue or byte-budget saturation and malformed SignalR records
+latch one nonterminal `TransportGap`. The accepted prefix is delivered first; the gap then reaches
+the consumer without waiting for disconnection. Later application data is discarded with that
+explicit signal until the consumer installs its recovery boundary and calls
+`acknowledge_transport_gap()`. Valid invocation completions and keepalives continue throughout.
+Malformed records do not hide later valid control records in the same batch.
 
-`RealtimeEventReceiver::acknowledge_transport_gap()` is a recovery gate, not a data repair method.
-Use this sequence:
+Gap acknowledgement resumes data admission on the same socket. It never requests a reconnect.
+If the socket actually ends during the gap, its lifecycle boundary is retained separately from the
+data queue and attributed to the old generation; a replacement cannot overtake that retained tail.
+An affected application projection must reconcile or obtain a fresh snapshot before claiming
+continuity. A continuity gap alone does not prove physical subscriptions ended.
 
-1. Receive `TransportGap` and mark every affected downstream projection stale or unavailable.
-2. Install the application's recovery fence and arrange a fresh snapshot or reconciliation.
-3. Call `acknowledge_transport_gap()` only after that fence is in place. Calling it before the gap
-   marker has been delivered has no effect.
-4. The watchdog may now reconnect. On `Reconnected`, replay the canonical subscriptions.
-5. Apply snapshot-before-delta recovery and clear the stale state only when reconciliation is
-   complete.
+### Migrating from 2.x
 
-This explicit acknowledgement prevents an overflow/reconnect loop from presenting a new live stream
-as though no data were lost.
+Version 3 removes the previous implicit disconnect after queue overflow, invocation timeout,
+invocation cancellation and inactivity. Consumers must acknowledge nonterminal gaps while their
+socket is still connected, retain uncertain subscription outcomes, and distinguish these gaps
+from generation-ended evidence. Prefer `recv_message()` and generation-scoped `session()` helpers
+when requests overlap reconnect. The provider-native REST and exact-decimal DTO surfaces are
+unchanged. No failed invocation is automatically resent.
 
 ## Real-time example
 

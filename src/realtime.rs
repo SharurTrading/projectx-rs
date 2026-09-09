@@ -62,8 +62,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+// Active WebSocket liveness: probe every 15 seconds; one unanswered probe
+// for that interval proves a failed ping/pong check, never mere data silence.
+const SOCKET_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
-const STALE_AFTER: Duration = Duration::from_secs(30);
 const WEBSOCKET_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 type PendingInvocation = oneshot::Sender<Result<(), ()>>;
@@ -390,255 +392,11 @@ pub enum RealtimeEvent {
     Message(Value),
 }
 
-struct EventFlow {
-    state: ParkingMutex<EventFlowState>,
-    queued_weight: AtomicUsize,
-    overflowed: AtomicBool,
-    changed: Notify,
-}
-
-#[derive(Default)]
-struct EventFlowState {
-    // Generation changes and publications linearize on `EventFlow::state`.
-    active_generation: Option<u64>,
-    overflow: Option<OverflowFence>,
-}
-
-struct OverflowFence {
-    generation: u64,
-    terminal_event: Option<RealtimeEvent>,
-    generation_ended: bool,
-}
-
-struct EventReservation {
-    flow: Arc<EventFlow>,
-    weight: usize,
-}
-
-impl Drop for EventReservation {
-    fn drop(&mut self) {
-        let previous = self
-            .flow
-            .queued_weight
-            .fetch_sub(self.weight, Ordering::AcqRel);
-        debug_assert!(previous >= self.weight);
-    }
-}
-
-struct EventEnvelope {
-    event: RealtimeEvent,
-    reservation: EventReservation,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PublishOutcome {
-    Published,
-    StaleGeneration,
-}
-
-impl EventEnvelope {
-    fn into_event(self) -> RealtimeEvent {
-        let Self { event, reservation } = self;
-        drop(reservation);
-        event
-    }
-}
-
-impl EventFlow {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: ParkingMutex::new(EventFlowState::default()),
-            queued_weight: AtomicUsize::new(0),
-            overflowed: AtomicBool::new(false),
-            changed: Notify::new(),
-        })
-    }
-
-    fn has_unacknowledged_gap(&self) -> bool {
-        self.overflowed.load(Ordering::Acquire)
-    }
-
-    fn start_generation(&self, generation: u64) -> Result<(), RealtimeError> {
-        let mut state = self.state.lock();
-        if state.overflow.is_some() {
-            return Err(RealtimeError::TransportGapPending);
-        }
-        if state.active_generation.is_some() {
-            return Err(RealtimeError::ConnectionCancelled);
-        }
-        state.active_generation = Some(generation);
-        Ok(())
-    }
-
-    fn publish(
-        self: &Arc<Self>,
-        events: &mpsc::Sender<EventEnvelope>,
-        generation: u64,
-        event: RealtimeEvent,
-        weight: usize,
-    ) -> Result<PublishOutcome, RealtimeError> {
-        let mut state = self.state.lock();
-        if state.active_generation != Some(generation) {
-            return Ok(PublishOutcome::StaleGeneration);
-        }
-        if let Some(overflow) = state.overflow.as_mut() {
-            if overflow.generation == generation
-                && matches!(event, RealtimeEvent::Disconnected)
-                && overflow.terminal_event.is_none()
-            {
-                overflow.terminal_event = Some(event);
-                drop(state);
-                self.changed.notify_waiters();
-                return Ok(PublishOutcome::Published);
-            }
-            return Err(RealtimeError::EventQueueFull);
-        }
-
-        let queued_weight = self.queued_weight.load(Ordering::Acquire);
-        if queued_weight
-            .checked_add(weight)
-            .is_none_or(|total| total > EVENT_BYTE_BUDGET)
-        {
-            self.latch_overflow(&mut state, generation, event);
-            return Err(RealtimeError::EventQueueFull);
-        }
-        self.queued_weight.fetch_add(weight, Ordering::AcqRel);
-        let envelope = EventEnvelope {
-            event,
-            reservation: EventReservation {
-                flow: Arc::clone(self),
-                weight,
-            },
-        };
-        match events.try_send(envelope) {
-            Ok(()) => Ok(PublishOutcome::Published),
-            Err(mpsc::error::TrySendError::Full(envelope)) => {
-                let event = envelope.into_event();
-                self.latch_overflow(&mut state, generation, event);
-                Err(RealtimeError::EventQueueFull)
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(RealtimeError::EventReceiverClosed),
-        }
-    }
-
-    fn latch_overflow(&self, state: &mut EventFlowState, generation: u64, event: RealtimeEvent) {
-        let terminal_event = matches!(event, RealtimeEvent::Disconnected).then_some(event);
-        state.overflow = Some(OverflowFence {
-            generation,
-            terminal_event,
-            generation_ended: false,
-        });
-        self.overflowed.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-    }
-
-    fn finish_generation(&self, generation: u64) {
-        let mut state = self.state.lock();
-        if state.active_generation != Some(generation) {
-            return;
-        }
-        state.active_generation = None;
-        let Some(overflow) = state.overflow.as_mut() else {
-            return;
-        };
-        if overflow.generation == generation {
-            overflow.generation_ended = true;
-            drop(state);
-            self.changed.notify_waiters();
-        }
-    }
-
-    fn acknowledge_gap(&self) -> bool {
-        let mut state = self.state.lock();
-        let ready = state
-            .overflow
-            .as_ref()
-            .is_some_and(|overflow| overflow.generation_ended && overflow.terminal_event.is_none());
-        if ready {
-            state.overflow = None;
-            self.overflowed.store(false, Ordering::Release);
-        }
-        ready
-    }
-}
-
-/// Single-consumer bounded receiver for real-time events.
-pub struct RealtimeEventReceiver {
-    events: mpsc::Receiver<EventEnvelope>,
-    flow: Arc<EventFlow>,
-    gap_reported: bool,
-}
-
-impl RealtimeEventReceiver {
-    /// Returns whether every producer for this event stream is gone.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        self.events.is_closed()
-    }
-
-    /// Receives the next accepted event or the ordered transport-gap marker.
-    pub async fn recv(&mut self) -> Option<RealtimeEvent> {
-        loop {
-            let changed = self.flow.changed.notified();
-            tokio::pin!(changed);
-            let _ = changed.as_mut().enable();
-            {
-                let mut state = self.flow.state.lock();
-                match self.events.try_recv() {
-                    Ok(envelope) => return Some(envelope.into_event()),
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => {}
-                }
-                if let Some(overflow) = state.overflow.as_mut()
-                    && overflow.generation_ended
-                {
-                    if let Some(event) = overflow.terminal_event.take() {
-                        return Some(event);
-                    }
-                    if !self.gap_reported {
-                        self.gap_reported = true;
-                        return Some(RealtimeEvent::TransportGap);
-                    }
-                }
-                if self.events.is_closed() {
-                    return None;
-                }
-            }
-
-            tokio::select! {
-                biased;
-                envelope = self.events.recv() => {
-                    if let Some(envelope) = envelope {
-                        return Some(envelope.into_event());
-                    }
-                }
-                () = &mut changed => {}
-            }
-        }
-    }
-
-    /// Allows reconnect after the caller has installed its recovery fence.
-    pub fn acknowledge_transport_gap(&mut self) {
-        if self.gap_reported && self.flow.acknowledge_gap() {
-            self.gap_reported = false;
-        }
-    }
-}
-
-impl fmt::Debug for RealtimeEventReceiver {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RealtimeEventReceiver")
-            .field("overflowed", &self.flow.has_unacknowledged_gap())
-            .field(
-                "queued_weight",
-                &self.flow.queued_weight.load(Ordering::Acquire),
-            )
-            .field("gap_reported", &self.gap_reported)
-            .finish_non_exhaustive()
-    }
-}
+mod event_flow;
+mod session_handle;
+use event_flow::{EventEnvelope, EventFlow, PublishOutcome};
+pub use event_flow::{RealtimeEventReceiver, RealtimeGeneration, RealtimeMessage};
+pub use session_handle::RealtimeSession;
 
 /// Errors returned by the real-time transport.
 #[derive(Debug, Error)]
@@ -654,6 +412,9 @@ pub enum RealtimeError {
     /// because the connection URL contains a bearer token.
     #[error("WebSocket transport failed")]
     Transport,
+    /// The peer did not answer the active WebSocket ping within its deadline.
+    #[error("WebSocket ping/pong check timed out")]
+    PingTimedOut,
     /// The `SignalR` handshake failed.
     #[error("SignalR handshake failed: {0}")]
     Handshake(&'static str),
@@ -678,6 +439,9 @@ pub enum RealtimeError {
     /// The client is not connected.
     #[error("real-time client is not connected")]
     NotConnected,
+    /// The captured socket ended before queue admission; nothing was sent.
+    #[error("real-time socket generation is no longer current")]
+    StaleGeneration,
     /// The typed subscription does not belong to this client's hub.
     #[error("subscription is not valid for this real-time hub")]
     WrongHub,
@@ -752,7 +516,10 @@ struct RealtimeInner {
     owner_cancel: CancellationToken,
     client_handles: AtomicUsize,
     watchdog_task: ParkingMutex<Option<JoinHandle<()>>>,
+    retirement_task: ParkingMutex<Option<JoinHandle<()>>>,
+    failed_close: AtomicU64,
     last_activity: ParkingMutex<Instant>,
+    socket_probe: ParkingMutex<Option<(u64, u64)>>,
     request_counter: AtomicU64,
     pending: PendingInvocations,
     event_tx: mpsc::Sender<EventEnvelope>,
@@ -817,22 +584,9 @@ impl Drop for ConnectClaim {
 }
 
 struct PendingGuard {
-    inner: Weak<RealtimeInner>,
     pending: PendingInvocations,
     invocation_id: String,
     generation: u64,
-    admitted: bool,
-    resolved: bool,
-}
-
-impl PendingGuard {
-    fn mark_admitted(&mut self) {
-        self.admitted = true;
-    }
-
-    fn resolve(&mut self) {
-        self.resolved = true;
-    }
 }
 
 impl Drop for PendingGuard {
@@ -845,12 +599,6 @@ impl Drop for PendingGuard {
             {
                 pending.remove(&self.invocation_id);
             }
-        }
-        if self.admitted
-            && !self.resolved
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.end_generation(self.generation);
         }
     }
 }
@@ -865,30 +613,6 @@ enum DisconnectAction {
 enum ProcessOutcome {
     Continue,
     Close,
-}
-
-struct DisconnectGuard {
-    inner: Weak<RealtimeInner>,
-    generation: u64,
-    session: Option<Session>,
-    complete: bool,
-}
-
-impl DisconnectGuard {
-    fn complete(&mut self) {
-        self.complete = true;
-    }
-}
-
-impl Drop for DisconnectGuard {
-    fn drop(&mut self) {
-        drop(self.session.take());
-        if !self.complete
-            && let Some(inner) = self.inner.upgrade()
-        {
-            inner.finish_closing(self.generation);
-        }
-    }
 }
 
 impl Drop for Session {
@@ -921,7 +645,10 @@ impl RealtimeClient {
                 owner_cancel: CancellationToken::new(),
                 client_handles: AtomicUsize::new(1),
                 watchdog_task: ParkingMutex::new(None),
+                retirement_task: ParkingMutex::new(None),
+                failed_close: AtomicU64::new(0),
                 last_activity: ParkingMutex::new(Instant::now()),
+                socket_probe: ParkingMutex::new(None),
                 request_counter: AtomicU64::new(1),
                 pending: Arc::default(),
                 event_tx,
@@ -967,20 +694,37 @@ impl RealtimeClient {
         self.inner.is_connected()
     }
 
+    /// Captures the current socket for generation-scoped subscription admission.
+    ///
+    /// # Errors
+    /// Returns [`RealtimeError::NotConnected`] unless a socket is ready.
+    pub fn session(&self) -> Result<RealtimeSession, RealtimeError> {
+        let lifecycle = self.inner.lifecycle.lock();
+        let Lifecycle::Connected(session) = &*lifecycle else {
+            return Err(RealtimeError::NotConnected);
+        };
+        Ok(RealtimeSession {
+            inner: Arc::downgrade(&self.inner),
+            generation: RealtimeGeneration(session.generation),
+        })
+    }
+
     /// Invokes an arbitrary provider target and waits for its completion frame.
     ///
     /// # Errors
     ///
     /// Returns an error when disconnected, a bounded capacity is exhausted,
     /// the provider rejects the invocation, or completion times out. A timeout
-    /// or cancellation after queue admission ends the connection generation so
-    /// callers can replay canonical subscriptions on reconnect.
+    /// or cancellation after queue admission has an unknown outcome and reclaims
+    /// only that invocation slot. It never closes the connection or retries the call.
     pub async fn invoke(
         &self,
         target: impl Into<String>,
         arguments: Vec<Value>,
     ) -> Result<(), RealtimeError> {
-        self.send_invocation(target.into(), arguments).await
+        self.inner
+            .send_invocation(None, target.into(), arguments)
+            .await
     }
 
     /// Subscribes to market trades for a contract.
@@ -992,9 +736,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("SubscribeContractTrades", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_contract_trades(contract).await
     }
 
     /// Unsubscribes from market trades for a contract.
@@ -1006,9 +751,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("UnsubscribeContractTrades", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_contract_trades(contract).await
     }
 
     /// Subscribes to market quotes for a contract.
@@ -1020,9 +766,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("SubscribeContractQuotes", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_contract_quotes(contract).await
     }
 
     /// Unsubscribes from market quotes for a contract.
@@ -1034,9 +781,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("UnsubscribeContractQuotes", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_contract_quotes(contract).await
     }
 
     /// Subscribes to market depth for a contract.
@@ -1048,9 +796,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("SubscribeContractMarketDepth", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_contract_depth(contract).await
     }
 
     /// Unsubscribes from market depth for a contract.
@@ -1062,9 +811,10 @@ impl RealtimeClient {
         &self,
         contract: &ContractId,
     ) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::Market)?;
-        self.contract_invocation("UnsubscribeContractMarketDepth", contract)
-            .await
+        if self.inner.hub != Hub::Market {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_contract_depth(contract).await
     }
 
     /// Subscribes to account updates.
@@ -1073,9 +823,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn subscribe_accounts(&self) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.send_invocation("SubscribeAccounts".to_owned(), Vec::new())
-            .await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_accounts().await
     }
 
     /// Unsubscribes from account updates.
@@ -1084,9 +835,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn unsubscribe_accounts(&self) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.send_invocation("UnsubscribeAccounts".to_owned(), Vec::new())
-            .await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_accounts().await
     }
 
     /// Subscribes to order updates for an account.
@@ -1095,8 +847,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn subscribe_orders(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("SubscribeOrders", account).await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_orders(account).await
     }
 
     /// Unsubscribes from order updates for an account.
@@ -1105,8 +859,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn unsubscribe_orders(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("UnsubscribeOrders", account).await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_orders(account).await
     }
 
     /// Subscribes to position updates for an account.
@@ -1115,8 +871,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn subscribe_positions(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("SubscribePositions", account).await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_positions(account).await
     }
 
     /// Unsubscribes from position updates for an account.
@@ -1125,9 +883,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn unsubscribe_positions(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("UnsubscribePositions", account)
-            .await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.unsubscribe_positions(account).await
     }
 
     /// Subscribes to trade updates for an account.
@@ -1136,8 +895,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn subscribe_trades(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("SubscribeTrades", account).await
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
+        }
+        self.session()?.subscribe_trades(account).await
     }
 
     /// Unsubscribes from trade updates for an account.
@@ -1146,44 +907,10 @@ impl RealtimeClient {
     ///
     /// Returns a real-time invocation error.
     pub async fn unsubscribe_trades(&self, account: AccountId) -> Result<(), RealtimeError> {
-        self.ensure_hub(Hub::User)?;
-        self.account_invocation("UnsubscribeTrades", account).await
-    }
-
-    fn ensure_hub(&self, expected: Hub) -> Result<(), RealtimeError> {
-        if self.inner.hub == expected {
-            Ok(())
-        } else {
-            Err(RealtimeError::WrongHub)
+        if self.inner.hub != Hub::User {
+            return Err(RealtimeError::WrongHub);
         }
-    }
-
-    async fn contract_invocation(
-        &self,
-        target: &str,
-        contract: &ContractId,
-    ) -> Result<(), RealtimeError> {
-        self.inner
-            .send_invocation(target.to_owned(), vec![Value::String(contract.to_string())])
-            .await
-    }
-
-    async fn account_invocation(
-        &self,
-        target: &str,
-        account: AccountId,
-    ) -> Result<(), RealtimeError> {
-        self.inner
-            .send_invocation(target.to_owned(), vec![Value::from(account.get())])
-            .await
-    }
-
-    async fn send_invocation(
-        &self,
-        target: String,
-        arguments: Vec<Value>,
-    ) -> Result<(), RealtimeError> {
-        self.inner.send_invocation(target, arguments).await
+        self.session()?.unsubscribe_trades(account).await
     }
 }
 
@@ -1339,7 +1066,7 @@ impl RealtimeInner {
     }
 
     fn install_ready(
-        &self,
+        self: &Arc<Self>,
         generation: u64,
         session: Session,
         event: RealtimeEvent,
@@ -1373,40 +1100,8 @@ impl RealtimeInner {
         }
     }
 
-    fn cancel_connect(&self, generation: u64) {
-        let mut lifecycle = self.lifecycle.lock();
-        let previous = std::mem::replace(&mut *lifecycle, Lifecycle::Disconnected);
-        let (session, notify, publish_disconnected) = match previous {
-            Lifecycle::Connecting {
-                generation: active,
-                cancellation,
-            } if active == generation => {
-                cancellation.cancel();
-                (None, true, false)
-            }
-            Lifecycle::Connected(session) if session.generation == generation => {
-                (Some(session), true, true)
-            }
-            Lifecycle::Closing {
-                generation: active,
-                was_connected: false,
-            } if active == generation => (None, true, false),
-            other => {
-                *lifecycle = other;
-                (None, false, false)
-            }
-        };
-        if notify {
-            self.finish_event_generation_locked(generation, publish_disconnected);
-        }
-        drop(lifecycle);
-        if notify {
-            self.fail_pending_generation(generation);
-            self.lifecycle_changed.notify_waiters();
-            drop(session);
-        } else {
-            drop(session);
-        }
+    fn cancel_connect(self: &Arc<Self>, generation: u64) {
+        self.end_generation(generation);
     }
 
     fn begin_disconnect(&self) -> DisconnectAction {
@@ -1462,25 +1157,13 @@ impl RealtimeInner {
             }
             DisconnectAction::Close(session) => {
                 let generation = session.generation;
-                self.fail_pending_generation(generation);
-                let mut guard = DisconnectGuard {
-                    inner: Arc::downgrade(self),
-                    generation,
-                    session: Some(session),
-                    complete: false,
-                };
-                let result = if let Some(session) = guard.session.as_mut() {
-                    match tokio::time::timeout(CLOSE_TIMEOUT, close_session(session)).await {
-                        Ok(result) => result,
-                        Err(_) => Err(RealtimeError::Close),
-                    }
-                } else {
+                self.retire_session(session, true);
+                self.wait_until_generation_ends(generation).await;
+                if self.failed_close.load(Ordering::Acquire) == generation {
                     Err(RealtimeError::Close)
-                };
-                drop(guard.session.take());
-                self.finish_closing(generation);
-                guard.complete();
-                result
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -1523,73 +1206,72 @@ impl RealtimeInner {
         self.lifecycle_changed.notify_waiters();
     }
 
-    fn end_generation(&self, generation: u64) {
+    fn end_generation(self: &Arc<Self>, generation: u64) {
         let mut lifecycle = self.lifecycle.lock();
         let previous = std::mem::replace(&mut *lifecycle, Lifecycle::Disconnected);
-        let (session, transitioned, should_publish) = match previous {
+        match previous {
+            Lifecycle::Connected(session) if session.generation == generation => {
+                *lifecycle = Lifecycle::Closing {
+                    generation,
+                    was_connected: true,
+                };
+                drop(lifecycle);
+                self.retire_session(session, false);
+            }
             Lifecycle::Connecting {
                 generation: active,
                 cancellation,
             } if active == generation => {
                 cancellation.cancel();
-                (None, true, false)
-            }
-            Lifecycle::Connected(session) if session.generation == generation => {
-                (Some(session), true, true)
+                drop(lifecycle);
+                self.lifecycle_changed.notify_waiters();
             }
             Lifecycle::Closing {
                 generation: active,
-                was_connected,
-            } if active == generation => (None, true, was_connected),
+                was_connected: false,
+            } if active == generation => {
+                drop(lifecycle);
+                self.lifecycle_changed.notify_waiters();
+            }
             other => {
                 *lifecycle = other;
-                (None, false, false)
             }
-        };
-        if transitioned {
-            self.finish_event_generation_locked(generation, should_publish);
-        }
-        drop(lifecycle);
-        if transitioned {
-            self.fail_pending_generation(generation);
-            self.lifecycle_changed.notify_waiters();
-            drop(session);
-        } else {
-            drop(session);
         }
     }
 
-    fn shutdown_now(&self) {
+    // The retained supervisor owns both task handles through their joins. A
+    // reader may request this transition without ever attempting to join itself.
+    fn retire_session(self: &Arc<Self>, mut session: Session, graceful: bool) {
+        let generation = session.generation;
+        if !graceful {
+            session.cancellation.cancel();
+        }
+        self.fail_pending_generation(generation);
+        let inner = Arc::clone(self);
+        let mut slot = self.retirement_task.lock();
+        *slot = Some(tokio::spawn(async move {
+            // A stuck writer cannot delay a real transport-loss boundary forever.
+            // Abort only after cancellation, then join before publishing evidence.
+            if graceful && send_queued(&session.writer, Message::Close(None)).is_err() {
+                session.cancellation.cancel();
+                inner.failed_close.store(generation, Ordering::Release);
+            }
+            if !join_socket_tasks(&mut session).await {
+                inner.failed_close.store(generation, Ordering::Release);
+            }
+            inner.finish_closing(generation);
+        }));
+    }
+
+    fn shutdown_now(self: &Arc<Self>) {
         self.owner_cancel.cancel();
-        let mut lifecycle = self.lifecycle.lock();
         self.reconnect_enabled.store(false, Ordering::Release);
         self.stop_watchdog();
-        let previous = std::mem::replace(&mut *lifecycle, Lifecycle::Disconnected);
-        let ended_generation = match previous {
-            Lifecycle::Connecting {
-                generation,
-                cancellation,
-            } => {
-                cancellation.cancel();
-                Some((generation, false))
-            }
-            Lifecycle::Connected(session) => {
-                let generation = session.generation;
-                drop(session);
-                Some((generation, true))
-            }
-            Lifecycle::Closing {
-                generation,
-                was_connected,
-            } => Some((generation, was_connected)),
-            Lifecycle::Disconnected => None,
-        };
-        if let Some((generation, publish_disconnected)) = ended_generation {
-            self.finish_event_generation_locked(generation, publish_disconnected);
+        let generation = self.lifecycle.lock().generation();
+        if let Some(generation) = generation {
+            self.end_generation(generation);
         }
-        drop(lifecycle);
         self.pending.lock().clear();
-        self.lifecycle_changed.notify_waiters();
     }
 
     // The caller holds `lifecycle`, preventing a replacement from becoming
@@ -1645,20 +1327,6 @@ impl RealtimeInner {
         {
             return;
         }
-        let stale_generation = {
-            let lifecycle = self.lifecycle.lock();
-            match &*lifecycle {
-                Lifecycle::Connected(session)
-                    if self.last_activity.lock().elapsed() > STALE_AFTER =>
-                {
-                    Some(session.generation)
-                }
-                _ => None,
-            }
-        };
-        if let Some(generation) = stale_generation {
-            self.end_generation(generation);
-        }
         let disconnected = matches!(*self.lifecycle.lock(), Lifecycle::Disconnected);
         if disconnected
             && let Err(error) = self.connect_once(true).await
@@ -1687,6 +1355,7 @@ impl RealtimeInner {
 
     async fn send_invocation(
         self: &Arc<Self>,
+        expected: Option<RealtimeGeneration>,
         target: String,
         arguments: Vec<Value>,
     ) -> Result<(), RealtimeError> {
@@ -1699,37 +1368,25 @@ impl RealtimeInner {
             .to_string();
         let message = encode_invocation(&invocation_id, &target, &arguments)?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        let (generation, writer) = self.register_invocation(&invocation_id, reply_tx)?;
-        let mut pending = PendingGuard {
-            inner: Arc::downgrade(self),
+        let (generation, writer) = self.register_invocation(expected, &invocation_id, reply_tx)?;
+        let _pending = PendingGuard {
             pending: Arc::clone(&self.pending),
             invocation_id: invocation_id.clone(),
             generation,
-            admitted: false,
-            resolved: false,
         };
         send_queued(&writer, message)?;
-        pending.mark_admitted();
 
         match tokio::time::timeout(COMPLETION_TIMEOUT, reply_rx).await {
-            Ok(Ok(Ok(()))) => {
-                pending.resolve();
-                Ok(())
-            }
-            Ok(Ok(Err(()))) => {
-                pending.resolve();
-                Err(RealtimeError::InvocationRejected { target })
-            }
-            Ok(Err(_)) => {
-                pending.resolve();
-                Err(RealtimeError::InvocationSessionEnded { target })
-            }
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(()))) => Err(RealtimeError::InvocationRejected { target }),
+            Ok(Err(_)) => Err(RealtimeError::InvocationSessionEnded { target }),
             Err(_) => Err(RealtimeError::InvocationTimedOut { target }),
         }
     }
 
     fn register_invocation(
         &self,
+        expected: Option<RealtimeGeneration>,
         invocation_id: &str,
         reply: PendingInvocation,
     ) -> Result<(u64, mpsc::Sender<Message>), RealtimeError> {
@@ -1737,6 +1394,9 @@ impl RealtimeInner {
         let Lifecycle::Connected(session) = &*lifecycle else {
             return Err(RealtimeError::NotConnected);
         };
+        if expected.is_some_and(|expected| expected.0 != session.generation) {
+            return Err(RealtimeError::StaleGeneration);
+        }
         let mut pending = self.pending.lock();
         if pending.len() >= PENDING_INVOCATION_CAPACITY {
             return Err(RealtimeError::PendingInvocationCapacity);
@@ -1752,80 +1412,97 @@ impl RealtimeInner {
     }
 
     fn process_text(&self, generation: u64, text: &str) -> Result<ProcessOutcome, RealtimeError> {
-        let records = text
-            .strip_suffix(SIGNALR_TERMINATOR)
-            .ok_or(RealtimeError::Protocol(
-                "message was missing its record separator",
-            ))?;
-        if records.is_empty() || records.split(SIGNALR_TERMINATOR).any(str::is_empty) {
-            return Err(RealtimeError::Protocol("message contained an empty record"));
+        let mut records = text.split(SIGNALR_TERMINATOR).peekable();
+        while let Some(frame) = records.next() {
+            if records.peek().is_none() {
+                if !frame.is_empty() {
+                    self.event_flow.mark_gap(generation);
+                }
+                break;
+            }
+            match self.process_record(generation, frame) {
+                Ok(ProcessOutcome::Continue) => {}
+                Ok(ProcessOutcome::Close) => return Ok(ProcessOutcome::Close),
+                Err(
+                    RealtimeError::Decode(_)
+                    | RealtimeError::Protocol(_)
+                    | RealtimeError::EventQueueFull,
+                ) => {
+                    self.event_flow.mark_gap(generation);
+                }
+                Err(error) => return Err(error),
+            }
         }
+        Ok(ProcessOutcome::Continue)
+    }
 
-        for frame in records.split(SIGNALR_TERMINATOR) {
-            let value: Value = serde_json::from_str(frame).map_err(RealtimeError::Decode)?;
-            let message_type = value
-                .get("type")
-                .ok_or(RealtimeError::Protocol("message type is missing"))?
-                .as_u64()
-                .ok_or(RealtimeError::Protocol(
-                    "message type was not an unsigned integer",
-                ))?;
-            match message_type {
-                1 => {
-                    let invocation = SignalRInvocation::from_json(frame)?.ok_or(
-                        RealtimeError::Protocol("type-1 frame was not an invocation"),
-                    )?;
-                    let weight = frame
-                        .len()
-                        .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
-                        .saturating_add(EVENT_BASE_WEIGHT);
-                    if self.publish(generation, RealtimeEvent::Invocation(invocation), weight)?
-                        == PublishOutcome::StaleGeneration
-                    {
-                        return Ok(ProcessOutcome::Close);
-                    }
-                }
-                3 => {
-                    let (invocation_id, result) = completion(&value)?;
-                    let reply = {
-                        let mut pending = self.pending.lock();
-                        if pending
-                            .get(invocation_id)
-                            .is_some_and(|entry| entry.generation == generation)
-                        {
-                            pending.remove(invocation_id).map(|entry| entry.reply)
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(reply) = reply {
-                        let _ = reply.send(result);
-                    }
-                }
-                6 => {}
-                7 => {
-                    if value.get("error").is_some_and(|error| !error.is_string()) {
-                        return Err(RealtimeError::Protocol("close error was not a string"));
-                    }
-                    let allow_reconnect = match value.get("allowReconnect") {
-                        Some(flag) => flag.as_bool().ok_or(RealtimeError::Protocol(
-                            "close allowReconnect flag was not a boolean",
-                        ))?,
-                        None => false,
-                    };
-                    self.apply_close_policy(generation, allow_reconnect);
+    fn process_record(
+        &self,
+        generation: u64,
+        frame: &str,
+    ) -> Result<ProcessOutcome, RealtimeError> {
+        let value: Value = serde_json::from_str(frame).map_err(RealtimeError::Decode)?;
+        let message_type = value
+            .get("type")
+            .ok_or(RealtimeError::Protocol("message type is missing"))?
+            .as_u64()
+            .ok_or(RealtimeError::Protocol(
+                "message type was not an unsigned integer",
+            ))?;
+        match message_type {
+            1 => {
+                let invocation = SignalRInvocation::from_json(frame)?.ok_or(
+                    RealtimeError::Protocol("type-1 frame was not an invocation"),
+                )?;
+                let weight = frame
+                    .len()
+                    .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
+                    .saturating_add(EVENT_BASE_WEIGHT);
+                if self.publish(generation, RealtimeEvent::Invocation(invocation), weight)?
+                    == PublishOutcome::StaleGeneration
+                {
                     return Ok(ProcessOutcome::Close);
                 }
-                _ => {
-                    let weight = frame
-                        .len()
-                        .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
-                        .saturating_add(EVENT_BASE_WEIGHT);
-                    if self.publish(generation, RealtimeEvent::Message(value), weight)?
-                        == PublishOutcome::StaleGeneration
+            }
+            3 => {
+                let (invocation_id, result) = completion(&value)?;
+                let reply = {
+                    let mut pending = self.pending.lock();
+                    if pending
+                        .get(invocation_id)
+                        .is_some_and(|entry| entry.generation == generation)
                     {
-                        return Ok(ProcessOutcome::Close);
+                        pending.remove(invocation_id).map(|entry| entry.reply)
+                    } else {
+                        None
                     }
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
+            6 => {}
+            7 => {
+                if value.get("error").is_some_and(|error| !error.is_string()) {
+                    return Err(RealtimeError::Protocol("close error was not a string"));
+                }
+                let _provider_hint = match value.get("allowReconnect") {
+                    Some(flag) => flag.as_bool().ok_or(RealtimeError::Protocol(
+                        "close allowReconnect flag was not a boolean",
+                    ))?,
+                    None => false,
+                };
+                return Ok(ProcessOutcome::Close);
+            }
+            _ => {
+                let weight = frame
+                    .len()
+                    .saturating_mul(EVENT_DECODED_WEIGHT_MULTIPLIER)
+                    .saturating_add(EVENT_BASE_WEIGHT);
+                if self.publish(generation, RealtimeEvent::Message(value), weight)?
+                    == PublishOutcome::StaleGeneration
+                {
+                    return Ok(ProcessOutcome::Close);
                 }
             }
         }
@@ -1858,11 +1535,18 @@ impl RealtimeInner {
             .retain(|_, entry| entry.generation != generation);
     }
 
-    fn apply_close_policy(&self, generation: u64, allow_reconnect: bool) {
-        let lifecycle = self.lifecycle.lock();
-        if lifecycle.generation() == Some(generation) && !allow_reconnect {
-            self.reconnect_enabled.store(false, Ordering::Release);
-            self.stop_watchdog();
+    fn acknowledge_probe(&self, payload: &[u8]) {
+        let Ok(payload) = <[u8; 16]>::try_from(payload) else {
+            return;
+        };
+        let (left, right) = payload.split_at(8);
+        let (Ok(left), Ok(right)) = (left.try_into(), right.try_into()) else {
+            return;
+        };
+        let answer = (u64::from_be_bytes(left), u64::from_be_bytes(right));
+        let mut probe = self.socket_probe.lock();
+        if *probe == Some(answer) {
+            *probe = None;
         }
     }
 
@@ -2028,19 +1712,30 @@ fn send_queued(writer: &mpsc::Sender<Message>, message: Message) -> Result<(), R
     })
 }
 
-async fn close_session(session: &mut Session) -> Result<(), RealtimeError> {
-    session
-        .writer
-        .send(Message::Close(None))
-        .await
-        .map_err(|_| RealtimeError::SendClosed)?;
-    (&mut session.writer_task)
-        .await
-        .map_err(|_| RealtimeError::Close)??;
-    (&mut session.reader_task)
-        .await
-        .map_err(|_| RealtimeError::Close)??;
-    Ok(())
+async fn join_socket_tasks(session: &mut Session) -> bool {
+    let deadline = tokio::time::sleep(CLOSE_TIMEOUT);
+    tokio::pin!(deadline);
+    let mut reader_done = false;
+    let mut writer_done = false;
+    loop {
+        if reader_done && writer_done {
+            return true;
+        }
+        tokio::select! {
+            _ = &mut session.reader_task, if !reader_done => reader_done = true,
+            _ = &mut session.writer_task, if !writer_done => writer_done = true,
+            () = &mut deadline => break,
+        }
+    }
+    if !reader_done {
+        session.reader_task.abort();
+        let _ = (&mut session.reader_task).await;
+    }
+    if !writer_done {
+        session.writer_task.abort();
+        let _ = (&mut session.writer_task).await;
+    }
+    false
 }
 
 async fn negotiate_handshake<S>(stream: &mut S) -> Result<Option<String>, RealtimeError>
@@ -2104,6 +1799,9 @@ where
     }
     let keepalive = tokio::time::sleep(CLIENT_KEEPALIVE_INTERVAL);
     tokio::pin!(keepalive);
+    let probe_tick = tokio::time::sleep(SOCKET_PROBE_INTERVAL);
+    tokio::pin!(probe_tick);
+    let mut probe_id = 0_u64;
     let result = loop {
         let message = tokio::select! {
             biased;
@@ -2115,6 +1813,21 @@ where
                 .await;
                 break Ok(());
             },
+            () = &mut probe_tick => {
+                let Some(inner) = inner.upgrade() else { break Ok(()); };
+                let mut probe = inner.socket_probe.lock();
+                if probe_id != 0 && *probe == Some((generation, probe_id)) {
+                    break Err(RealtimeError::PingTimedOut);
+                }
+                let Some(next) = probe_id.checked_add(1) else { break Err(RealtimeError::IdentifierCapacity); };
+                probe_id = next;
+                *probe = Some((generation, probe_id));
+                let mut payload = Vec::with_capacity(16);
+                payload.extend_from_slice(&generation.to_be_bytes());
+                payload.extend_from_slice(&probe_id.to_be_bytes());
+                probe_tick.as_mut().reset(Instant::now() + SOCKET_PROBE_INTERVAL);
+                Message::Ping(payload.into())
+            }
             message = messages.recv() => {
                 match message {
                     Some(message) => message,
@@ -2124,15 +1837,18 @@ where
             () = &mut keepalive => Message::Text(SIGNALR_PING.into()),
         };
         let is_close = matches!(message, Message::Close(_));
+        let is_signalr = matches!(message, Message::Text(_) | Message::Binary(_));
         if write.send(message).await.is_err() {
             break Err(RealtimeError::Transport);
         }
         if is_close {
             break Ok(());
         }
-        keepalive
-            .as_mut()
-            .reset(Instant::now() + CLIENT_KEEPALIVE_INTERVAL);
+        if is_signalr {
+            keepalive
+                .as_mut()
+                .reset(Instant::now() + CLIENT_KEEPALIVE_INTERVAL);
+        }
     };
     if result.is_err() && !cancellation.is_cancelled() {
         cancellation.cancel();
@@ -2186,10 +1902,12 @@ where
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
-                    let text = std::str::from_utf8(bytes.as_ref())
-                        .map_err(|_| RealtimeError::Protocol("binary frame was not UTF-8"))?;
                     let Some(inner) = inner.upgrade() else {
                         return Ok(());
+                    };
+                    let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
+                        inner.event_flow.mark_gap(generation);
+                        continue;
                     };
                     let outcome = inner.process_text(generation, text)?;
                     inner.record_activity(generation);
@@ -2206,10 +1924,11 @@ where
                 }
                 Some(Ok(Message::Close(_))) | None => return Ok(()),
                 Some(Err(_)) => return Err(RealtimeError::Transport),
-                Some(Ok(Message::Pong(_))) => {
+                Some(Ok(Message::Pong(payload))) => {
                     let Some(inner) = inner.upgrade() else {
                         return Ok(());
                     };
+                    inner.acknowledge_probe(&payload);
                     inner.record_activity(generation);
                 }
                 Some(Ok(Message::Frame(_))) => {}
@@ -2434,7 +2153,9 @@ mod tests {
             "{\"type\":7,\"error\":null}\u{001e}",
         ] {
             assert!(matches!(
-                realtime.inner.process_text(1, frame),
+                realtime
+                    .inner
+                    .process_record(1, frame.trim_end_matches(SIGNALR_TERMINATOR)),
                 Err(RealtimeError::Protocol(_))
             ));
         }
@@ -2460,7 +2181,7 @@ mod tests {
         ] {
             assert!(matches!(
                 realtime.inner.process_text(1, batch),
-                Err(RealtimeError::Protocol(_))
+                Ok(ProcessOutcome::Continue)
             ));
         }
         assert!(matches!(
@@ -2596,7 +2317,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gap_waits_for_generation_end_and_all_accepted_events() {
+    async fn ended_boundary_waits_for_both_socket_producers_to_drop() {
+        struct Probe(Arc<AtomicUsize>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let realtime = fixture_realtime();
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let (release, wait) = oneshot::channel::<()>();
+        let (writer, _writes) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let reader_probe = Probe(Arc::clone(&stopped));
+        let writer_probe = Probe(Arc::clone(&stopped));
+        let writer_cancel = cancel.clone();
+        let session = Session {
+            generation: 1,
+            writer,
+            cancellation: cancel,
+            reader_task: tokio::spawn(async move {
+                let _probe = reader_probe;
+                let _ = wait.await;
+                Ok(())
+            }),
+            writer_task: tokio::spawn(async move {
+                let _probe = writer_probe;
+                writer_cancel.cancelled().await;
+                Ok(())
+            }),
+        };
+        realtime
+            .inner
+            .event_flow
+            .start_generation(1)
+            .unwrap_or_else(|e| panic!("start: {e}"));
+        *realtime.inner.lifecycle.lock() = Lifecycle::Connected(session);
+        let mut events = realtime
+            .take_event_receiver()
+            .unwrap_or_else(|| panic!("receiver"));
+        realtime.inner.end_generation(1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv_message())
+                .await
+                .is_err()
+        );
+        assert!(stopped.load(Ordering::SeqCst) < 2);
+        assert!(release.send(()).is_ok());
+        let ended = events
+            .recv_message()
+            .await
+            .unwrap_or_else(|| panic!("ended boundary"));
+        assert_eq!(ended.generation, RealtimeGeneration(1));
+        assert_eq!(ended.event, RealtimeEvent::Disconnected);
+        assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn gap_follows_accepted_events_without_waiting_for_generation_end() {
         let flow = EventFlow::new();
         let (events_tx, events_rx) = mpsc::channel(2);
         let mut receiver = RealtimeEventReceiver {
@@ -2652,11 +2430,8 @@ mod tests {
         terminal_staged_rx
             .await
             .unwrap_or_else(|error| panic!("terminal-staged signal must arrive: {error}"));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), receiver.recv())
-                .await
-                .is_err()
-        );
+        assert_eq!(receiver.recv().await, Some(RealtimeEvent::TransportGap));
+        receiver.acknowledge_transport_gap();
         finish_tx
             .send(())
             .unwrap_or_else(|()| panic!("finish signal must send"));
@@ -2665,8 +2440,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("producer must join: {error}"));
 
         assert_eq!(receiver.recv().await, Some(RealtimeEvent::Disconnected));
-        assert_eq!(receiver.recv().await, Some(RealtimeEvent::TransportGap));
-        receiver.acknowledge_transport_gap();
         flow.start_generation(generation + 1)
             .unwrap_or_else(|error| {
                 panic!("acknowledgement must allow the next generation: {error}")
@@ -2787,8 +2560,8 @@ mod tests {
                 .unwrap_or_else(|error| panic!("close frame must decode: {error}")),
             ProcessOutcome::Close
         );
-        assert!(!realtime.inner.reconnect_enabled.load(Ordering::Acquire));
-        assert!(realtime.inner.watchdog_task.lock().is_none());
+        assert!(realtime.inner.reconnect_enabled.load(Ordering::Acquire));
+        assert!(realtime.inner.watchdog_task.lock().is_some());
     }
 
     #[tokio::test]
@@ -2871,11 +2644,11 @@ mod tests {
         ));
         assert!(matches!(
             events.recv().await,
-            Some(RealtimeEvent::Disconnected)
+            Some(RealtimeEvent::TransportGap)
         ));
         assert!(matches!(
             events.recv().await,
-            Some(RealtimeEvent::TransportGap)
+            Some(RealtimeEvent::Disconnected)
         ));
         assert!(matches!(
             realtime.connect().await,

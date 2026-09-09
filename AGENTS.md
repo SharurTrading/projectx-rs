@@ -48,9 +48,12 @@ domain translation.
   runtime or block an async executor.
 - **PX-TRANSPORT-01:** Responses are size-bounded. Real-time queues are bounded with explicit
   overflow behavior. A websocket is not ready until the SignalR handshake is validated. Real-time
-  lifecycle transitions are generation-fenced and single-writer; cancelling an invocation reclaims
-  its pending slot, either socket half failing tears down the whole session, and dropping the last
-  caller-owned handle cancels every library-owned task.
+  lifecycle transitions are generation-fenced and single-writer. Invocation cancellation/timeout
+  reclaims only its pending slot, never the socket. Malformed application records and event overflow
+  produce nonterminal gaps; ordinary silence never triggers teardown. Actual socket failure and
+  remote close permit transport recovery while Connect remains requested. Generation-ended evidence
+  follows both socket-task joins. Explicit disconnect and dropping the final client owner cancel
+  owned work; operational session handles have no lifecycle authority.
 - **PX-ORDER-01:** Order placement is not automatically retried because a timeout after submission
   is an ambiguous money-moving outcome. Retry policies must distinguish safe queries from mutations.
   Documented pending/unknown outcomes and unrecognized future mutation codes are ambiguous; only an
