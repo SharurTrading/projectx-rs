@@ -12,7 +12,17 @@ reviews:
   path_instructions:
     - path: "**/*"
       instructions: |
-        Apply AGENTS.md, including PX-FOLLOWUP-01 (Follow-ups are issues).
+        Read the complete AGENTS.md at the repository root and use it as the
+        authoritative review contract for every change. Enforce the mission and
+        every applicable non-negotiable PX-* rule, Rust API standard, review
+        requirement, and release gate. Evaluate the changed code and relevant
+        surrounding context against the full contract.
+        Report correctness and design findings as [BLOCKER], [MAJOR], or [MINOR].
+        Cite the applicable rule ID where one exists, otherwise the AGENTS.md
+        section, and include the file, line, risk, and concrete fix. Blocker and
+        major findings require changes before merge.
+
+        For PX-FOLLOWUP-01 (Follow-ups are issues), apply these additional checks:
         Check the PR description, commit messages, review replies, and changed files
         for deferred work, including source comments, plans, documentation, gaps
         discovered outside the diff, and reviewer questions left for later.
