@@ -69,6 +69,14 @@ domain translation.
   Provider 429 cooldowns are shared and mutations are never retried automatically.
 - **PX-VALIDATE-01:** Normal CI is deterministic and credential-free. Live tests are ignored,
   read-only, and deliberately invoked.
+- **PX-FOLLOWUP-01 (Follow-ups are issues):** Any follow-up identified in a PR description,
+  commit message, review reply, source comment, plan, or documentation must be completed in the
+  same change or tracked by a GitHub issue in this repository before merge. Cite the issue number
+  or link wherever the work is deferred; reuse an existing issue when it already covers the work.
+  This includes gaps discovered outside the current diff and reviewer questions deferred for later.
+  Promises such as "later", "out of scope", or "separate PR" do not count as tracking. An untracked
+  follow-up is a `[BLOCKER]`. Filing an issue does not waive a blocker or major finding that requires
+  changes before merge.
 
 ## Rust API standards
 

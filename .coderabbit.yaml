@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Kevin Monaghan
+# SPDX-License-Identifier: MIT-0
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+inheritance: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+
+reviews:
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Apply AGENTS.md, including PX-FOLLOWUP-01 (Follow-ups are issues).
+        Check the PR description, commit messages, review replies, and changed files
+        for deferred work, including source comments, plans, documentation, gaps
+        discovered outside the diff, and reviewer questions left for later.
+        Every follow-up must be completed in this change or cite a GitHub issue in
+        this repository wherever it is deferred before merge. An existing issue
+        covering the work is sufficient; do not request duplicates. Promises such
+        as "later", "out of scope", or "separate PR" are not tracking.
+        Report untracked follow-ups as [BLOCKER] under PX-FOLLOWUP-01, identify
+        where the deferral occurs, and request completion or a concrete issue link.
+        An issue does not waive a blocker or major finding requiring changes before merge.
