@@ -8,6 +8,23 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [3.0.1] - 2026-09-14
+
+### Fixed
+
+- Reject trailing-stop placements that omit `trailPrice` with
+  `RequestValidationError::MissingTrailPrice` before submission.
+- Correct trailing-stop documentation: placement and modification accept absolute price levels,
+  while order searches return a trail distance in price units. Document the provider's placement
+  distance limit, modification behavior, bracket-mode requirement, and cancellation eligibility.
+
+### Changed
+
+- Update the `reqwest` lockfile resolution from 0.13.4 to 0.13.5, including its new `base64` 0.23.1
+  dependency, through [#33](https://github.com/SharurTrading/projectx-rs/pull/33).
+- Refresh all `taiki-e/install-action` CI pins from v2.87.4 to v2.87.10 through
+  [#32](https://github.com/SharurTrading/projectx-rs/pull/32).
+
 ## [3.0.0] - 2026-09-09
 
 ### Breaking changes
@@ -146,7 +163,8 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v1.0.1...v2.0.0

@@ -644,6 +644,8 @@ impl Client {
     /// This method never retries. An untrustworthy response is returned as
     /// [`Error::AmbiguousMutation`]; callers must reconcile open and recent
     /// orders before deciding whether another submission is safe.
+    /// A returned order ID alone does not imply acceptance: provider code `2`
+    /// can accompany a rejected order record and remains [`Error::Provider`].
     ///
     /// # Errors
     ///
@@ -663,6 +665,11 @@ impl Client {
     }
 
     /// Cancels an order exactly once.
+    ///
+    /// The provider supports direct cancellation only for simulated accounts
+    /// that are not copy-trading followers. Unsupported accounts return
+    /// provider code `6`; the client leaves account eligibility to the provider.
+    /// See the [cancellation reference](https://gateway.docs.projectx.com/docs/api-reference/order/order-cancel/).
     ///
     /// This method never retries. If the provider may have admitted the
     /// request but no trustworthy result is available, it returns

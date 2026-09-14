@@ -12,8 +12,9 @@ use std::{
 };
 
 use projectx_client::{
-    AccountId, CancelOrder, Client, CloseContract, ContractId, Credentials, Endpoints, Error,
-    ModifyOrder, OrderId, OrderType, PartialCloseContract, PlaceOrder, ProviderError, Side,
+    AccountId, Bracket, CancelOrder, Client, CloseContract, ContractId, Credentials, Decimal,
+    Endpoints, Error, ModifyOrder, OrderId, OrderType, PartialCloseContract, PlaceOrder,
+    ProviderError, Side,
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -968,6 +969,51 @@ async fn endpoint_mutation_codes_distinguish_ambiguous_from_definitive_outcomes(
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
     assert_eq!(count, 21);
+}
+
+#[tokio::test]
+async fn documented_order_rejections_remain_definitive_even_with_an_order_id() {
+    let (address, server) = start_server(vec![
+        (200, r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#),
+        (200, r#"{"orderId":84,"success":false,"errorCode":2,"errorMessage":"Brackets cannot be used with Position Brackets. You must enable Auto OCO Brackets."}"#),
+        (200, r#"{"success":false,"errorCode":6,"errorMessage":"Follower accounts cannot cancel orders"}"#),
+        (200, r#"{"success":false,"errorCode":6,"errorMessage":"Live accounts not supported"}"#),
+        (200, r#"{"success":false,"errorCode":3,"errorMessage":"Invalid trail price. Price is not aligned to tick size."}"#),
+    ]).await;
+    let client = client(address, 3);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    let order_id =
+        OrderId::new(84).unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
+    let stop_loss = Bracket::new(4, OrderType::Stop)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
+    let place = PlaceOrder::builder(account_id, contract_id, OrderType::Market, Side::Bid, 1)
+        .stop_loss_bracket(stop_loss)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}"));
+    assert_definitive_provider_rejection(client.place_order(&place).await, 2);
+
+    let cancel = CancelOrder {
+        account_id,
+        order_id,
+    };
+    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6);
+    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6);
+    let modify = ModifyOrder::builder(account_id, order_id)
+        .trail_price(Decimal::new(10_401, 2))
+        .build()
+        .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
+    assert_definitive_provider_rejection(client.modify_order(&modify).await, 3);
+    let count = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert_eq!(count, 5);
 }
 
 #[tokio::test]
