@@ -310,13 +310,13 @@ fn current_provider_response_fields_decode_exactly() {
         "filledPrice": 100.125,
         "customTag": "schema-contract",
         "trailDistance": 8,
-        "trailPrice": 100.25,
+        "trailPrice": 2.00,
         "parentOrderId": 4_294_967_296_i64,
         "linkedOrderId": 4_294_967_297_i64
     }))
     .unwrap_or_else(|error| panic!("current order schema must decode: {error}"));
     assert_eq!(order.trail_distance, Some(8));
-    assert_eq!(order.trail_price, Some(Decimal::new(10_025, 2)));
+    assert_eq!(order.trail_price, Some(Decimal::new(200, 2)));
     assert_eq!(order.parent_order_id.map(OrderId::get), Some(4_294_967_296));
     assert_eq!(order.linked_order_id.map(OrderId::get), Some(4_294_967_297));
 

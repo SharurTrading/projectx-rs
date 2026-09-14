@@ -194,7 +194,7 @@ async fn order_endpoints_use_typed_exact_requests() {
     assert_eq!(order, orders[0]);
     assert_eq!(orders[0].status, OrderStatus::Open);
     assert_eq!(orders[0].trail_distance, Some(8));
-    assert_eq!(orders[0].trail_price, Some(Decimal::new(10_025, 2)));
+    assert_eq!(orders[0].trail_price, Some(Decimal::new(200, 2)));
     assert_eq!(
         orders[0].parent_order_id.map(OrderId::get),
         Some(4_294_967_296)
@@ -204,6 +204,104 @@ async fn order_endpoints_use_typed_exact_requests() {
         Some(4_294_967_297)
     );
     assert_eq!(placed.order_id, order_id());
+}
+
+#[tokio::test]
+async fn trailing_stop_requests_send_price_levels_and_searches_preserve_distances() {
+    let server = MockServer::start_async().await;
+    let place = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/place").json_body(json!({
+                "accountId": 42,
+                "contractId": "CON.F.US.MNQ.M26",
+                "type": 5,
+                "side": 1,
+                "size": 1,
+                "trailPrice": 104.25
+            }));
+            then.status(200)
+                .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
+        })
+        .await;
+    let modify = operation_mock(
+        &server,
+        "/api/Order/modify",
+        json!({"accountId": 42, "orderId": 84, "trailPrice": 104.50}),
+    )
+    .await;
+    let mut trailing_order = order_json();
+    trailing_order["type"] = json!(5);
+    trailing_order["side"] = json!(1);
+    trailing_order["limitPrice"] = json!(null);
+    trailing_order["stopPrice"] = json!(104.25);
+    trailing_order["trailDistance"] = json!(6);
+    trailing_order["trailPrice"] = json!(1.50);
+    let mut searches = Vec::new();
+    for (path, body) in [
+        (
+            "/api/Order/search",
+            json!({"accountId": 42, "startTimestamp": "2026-01-01T00:00:00Z"}),
+        ),
+        ("/api/Order/searchOpen", json!({"accountId": 42})),
+    ] {
+        searches.push(
+            server
+                .mock_async(|when, then| {
+                    when.method(POST).path(path).json_body(body);
+                    then.status(200).json_body(json!({
+                        "orders": [trailing_order], "success": true, "errorCode": 0
+                    }));
+                })
+                .await,
+        );
+    }
+    let client = authenticated_client(&server).await;
+    let request = PlaceOrder::builder(
+        account_id(),
+        contract_id(),
+        OrderType::TrailingStop,
+        Side::Ask,
+        1,
+    )
+    .trail_price(Decimal::new(10_425, 2))
+    .build()
+    .unwrap_or_else(|error| panic!("trailing placement must build: {error}"));
+    let placed = client
+        .place_order(&request)
+        .await
+        .unwrap_or_else(|error| panic!("trailing placement must succeed: {error}"));
+    assert_eq!(placed.order_id, order_id());
+
+    let search = OrderSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
+        .unwrap_or_else(|error| panic!("order search must build: {error}"));
+    let orders = client
+        .search_orders(&search)
+        .await
+        .unwrap_or_else(|error| panic!("order search must succeed: {error}"));
+    let open_orders = client
+        .search_open_orders(account_id())
+        .await
+        .unwrap_or_else(|error| panic!("open-order search must succeed: {error}"));
+    assert_eq!(orders, open_orders);
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0].trail_price, Some(Decimal::new(150, 2)));
+    assert_eq!(orders[0].trail_distance, Some(6));
+    assert_eq!(orders[0].stop_price, request.trail_price());
+
+    let replacement = ModifyOrder::builder(account_id(), order_id())
+        .trail_price(Decimal::new(10_450, 2))
+        .build()
+        .unwrap_or_else(|error| panic!("trailing modification must build: {error}"));
+    client
+        .modify_order(&replacement)
+        .await
+        .unwrap_or_else(|error| panic!("trailing modification must succeed: {error}"));
+    assert_eq!(replacement.trail_price(), Some(Decimal::new(10_450, 2)));
+    place.assert_async().await;
+    modify.assert_async().await;
+    for search in searches {
+        search.assert_async().await;
+    }
 }
 
 #[tokio::test]
@@ -532,7 +630,7 @@ fn order_json() -> serde_json::Value {
         "filledPrice": null,
         "customTag": "synthetic-order",
         "trailDistance": 8,
-        "trailPrice": 100.25,
+        "trailPrice": 2.00,
         "parentOrderId": 4_294_967_296_i64,
         "linkedOrderId": 4_294_967_297_i64
     })

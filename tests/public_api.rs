@@ -465,6 +465,52 @@ fn request_builders_reject_invalid_states() {
     );
 }
 
+#[test]
+fn only_trailing_stop_placements_require_a_trail_price() {
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    for order_type in [
+        OrderType::Limit,
+        OrderType::Market,
+        OrderType::Stop,
+        OrderType::TrailingStop,
+        OrderType::JoinBid,
+        OrderType::JoinAsk,
+    ] {
+        let builder =
+            PlaceOrder::builder(account_id, contract_id.clone(), order_type, Side::Ask, 1);
+        if order_type == OrderType::TrailingStop {
+            assert_eq!(
+                builder.build(),
+                Err(RequestValidationError::MissingTrailPrice)
+            );
+        } else {
+            assert!(builder.build().is_ok());
+        }
+    }
+
+    // Absolute price levels have no locally imposed positivity or distance limit.
+    for price in [
+        Decimal::NEGATIVE_ONE,
+        Decimal::ZERO,
+        Decimal::new(10_425, 2),
+    ] {
+        let request = PlaceOrder::builder(
+            account_id,
+            contract_id.clone(),
+            OrderType::TrailingStop,
+            Side::Ask,
+            1,
+        )
+        .trail_price(price)
+        .build()
+        .unwrap_or_else(|error| panic!("an explicit trail price must build: {error}"));
+        assert_eq!(request.trail_price(), Some(price));
+    }
+}
+
 #[tokio::test]
 async fn bodyless_provider_rejection_is_a_typed_provider_error() {
     let server = MockServer::start_async().await;

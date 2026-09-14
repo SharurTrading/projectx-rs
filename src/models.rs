@@ -1014,7 +1014,11 @@ pub struct Order {
     /// Optional trailing distance in provider ticks.
     #[serde(default)]
     pub trail_distance: Option<i32>,
-    /// Optional current trailing-stop price.
+    /// Optional trailing distance in price units (`ticks * tick size`).
+    ///
+    /// Order searches return a distance here. Placement and modification
+    /// instead accept an absolute price level; do not reuse this value as
+    /// their `trail_price` input.
     #[serde(default, with = "crate::decimal_serde::option")]
     pub trail_price: Option<Decimal>,
     /// Parent order for a bracket child, when supplied.
@@ -1032,6 +1036,9 @@ pub enum RequestValidationError {
     /// An order placement quantity was zero or negative.
     #[error("order size must be positive")]
     NonPositiveOrderSize,
+    /// A trailing-stop placement omitted its absolute starting price level.
+    #[error("trailing-stop placement requires an absolute trail price")]
+    MissingTrailPrice,
     /// A replacement quantity was zero or negative.
     #[error("replacement order size must be positive")]
     NonPositiveReplacementSize,
@@ -1083,6 +1090,10 @@ pub enum RequestValidationError {
 }
 
 /// `ProjectX` bracket-leg configuration.
+///
+/// Placement accepts bracket legs only in the account's Auto OCO Brackets
+/// mode. Position Brackets mode rejects them with provider code `2`, even
+/// though the response can include an ID for the rejected order record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bracket {
@@ -1124,7 +1135,8 @@ impl Bracket {
 /// Order placement parameters.
 ///
 /// Construct this request with [`PlaceOrder::builder`], which prevents an
-/// invalid non-positive quantity from reaching the transport.
+/// invalid non-positive quantity or trailing stop without a starting price
+/// from reaching the transport.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceOrder {
@@ -1151,7 +1163,7 @@ pub struct PlaceOrder {
         with = "crate::decimal_serde::option"
     )]
     stop_price: Option<Decimal>,
-    /// Optional trailing price.
+    /// Absolute starting price level, required for trailing-stop orders.
     #[serde(
         skip_serializing_if = "Option::is_none",
         with = "crate::decimal_serde::option"
@@ -1234,7 +1246,9 @@ impl PlaceOrder {
         self.stop_price
     }
 
-    /// Returns the optional trailing price.
+    /// Returns the absolute starting price level for a trailing-stop order.
+    ///
+    /// This input differs from the distance returned in [`Order::trail_price`].
     #[must_use]
     pub const fn trail_price(&self) -> Option<Decimal> {
         self.trail_price
@@ -1289,7 +1303,13 @@ impl PlaceOrderBuilder {
         self
     }
 
-    /// Sets the optional trailing price.
+    /// Sets the absolute starting price level required for a trailing stop.
+    ///
+    /// The provider derives a fixed tick distance from its last traded price
+    /// when it receives the request, dropping fractional ticks. It checks tick
+    /// alignment, quote availability, and a maximum distance of 1,000 ticks.
+    /// These checks require provider state and are not performed by this builder.
+    /// See the [placement reference](https://gateway.docs.projectx.com/docs/api-reference/order/order-place/).
     pub const fn trail_price(mut self, trail_price: Decimal) -> Self {
         self.trail_price = Some(trail_price);
         self
@@ -1302,12 +1322,16 @@ impl PlaceOrderBuilder {
     }
 
     /// Sets the optional stop-loss bracket.
+    ///
+    /// Requires the account's Auto OCO Brackets mode; see [`Bracket`].
     pub fn stop_loss_bracket(mut self, stop_loss_bracket: Bracket) -> Self {
         self.stop_loss_bracket = Some(stop_loss_bracket);
         self
     }
 
     /// Sets the optional take-profit bracket.
+    ///
+    /// Requires the account's Auto OCO Brackets mode; see [`Bracket`].
     pub fn take_profit_bracket(mut self, take_profit_bracket: Bracket) -> Self {
         self.take_profit_bracket = Some(take_profit_bracket);
         self
@@ -1319,7 +1343,9 @@ impl PlaceOrderBuilder {
     ///
     /// Returns an error when the order quantity is zero or negative, when its
     /// order type is undocumented for placement, or when its side code is
-    /// unknown to this crate version.
+    /// unknown to this crate version. Returns
+    /// [`RequestValidationError::MissingTrailPrice`] when a trailing stop has
+    /// no absolute starting price level.
     pub fn build(self) -> Result<PlaceOrder, RequestValidationError> {
         if self.size <= 0 {
             return Err(RequestValidationError::NonPositiveOrderSize);
@@ -1327,6 +1353,9 @@ impl PlaceOrderBuilder {
         validate_request_order_type(self.order_type)?;
         if let Side::Unknown(code) = self.side {
             return Err(RequestValidationError::UnsupportedOrderSide { code });
+        }
+        if self.order_type == OrderType::TrailingStop && self.trail_price.is_none() {
+            return Err(RequestValidationError::MissingTrailPrice);
         }
         Ok(PlaceOrder {
             account_id: self.account_id,
@@ -1401,7 +1430,7 @@ pub struct ModifyOrder {
         with = "crate::decimal_serde::option"
     )]
     stop_price: Option<Decimal>,
-    /// Optional replacement trailing price.
+    /// Optional absolute replacement price level for a trailing stop.
     #[serde(
         skip_serializing_if = "Option::is_none",
         with = "crate::decimal_serde::option"
@@ -1452,7 +1481,9 @@ impl ModifyOrder {
         self.stop_price
     }
 
-    /// Returns the optional replacement trailing price.
+    /// Returns the optional absolute replacement price level for a trailing stop.
+    ///
+    /// This input differs from the distance returned in [`Order::trail_price`].
     #[must_use]
     pub const fn trail_price(&self) -> Option<Decimal> {
         self.trail_price
@@ -1490,7 +1521,14 @@ impl ModifyOrderBuilder {
         self
     }
 
-    /// Sets the replacement trailing price.
+    /// Sets an absolute replacement price level for a trailing-stop order.
+    ///
+    /// The provider recalculates the tick distance using its last traded price
+    /// at modification time. Tick alignment and quote availability are checked
+    /// by the provider, but modification has no maximum-distance check. Supplying
+    /// the distance from [`Order::trail_price`] can therefore be accepted with
+    /// an unintended trail. Omit this setter to leave the trail unchanged.
+    /// See the [modification reference](https://gateway.docs.projectx.com/docs/api-reference/order/order-modify/).
     pub const fn trail_price(mut self, trail_price: Decimal) -> Self {
         self.trail_price = Some(trail_price);
         self

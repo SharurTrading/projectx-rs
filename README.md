@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=3.0.0)](https://crates.io/crates/projectx-client/3.0.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/3.0.0?v=3.0.0)](https://docs.rs/projectx-client/3.0.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=3.0.1)](https://crates.io/crates/projectx-client/3.0.1)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/3.0.1?v=3.0.1)](https://docs.rs/projectx-client/3.0.1/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -116,6 +116,29 @@ Money-moving methods never retry automatically. Provider codes documented as pen
 as well as future codes this crate does not recognize, return `Error::AmbiguousMutation`; reconcile
 provider state before retrying. Only endpoint-specific codes documented as definitive rejections
 return `Error::Provider`.
+
+### Trailing stops and bracket settings
+
+For `OrderType::TrailingStop`, placement requires `.trail_price(Decimal)` containing an absolute
+price level. Modification uses the same input meaning. Search responses expose a distance in price
+units in `Order::trail_price`, so copying that field into a modification changes its meaning.
+For example, a synthetic sell stop submitted at `104.25` against a last trade of `105.75` and a
+`0.25` tick size reads back with a trail distance of `1.50` (six ticks).
+
+The server uses its quote at request arrival to calculate the trail, truncates fractional ticks,
+and validates tick alignment and quote availability. Placement rejects distances above 1,000 ticks;
+modification has no such limit. See the [placement][order-place] and [modification][order-modify]
+references. The builders preserve exact decimal inputs and leave quote-dependent checks to the server.
+
+Attaching either bracket leg requires Auto OCO Brackets in the account's platform risk settings.
+Position Brackets mode produces placement code `2` and can still return an ID for the rejected
+record; the client correctly returns `Error::Provider`. [Cancellation][order-cancel] is supported
+only for simulated accounts that are not copy-trading followers; other accounts receive code `6`.
+Provider errors expose the numeric code and intentionally discard untrusted remote error messages.
+
+[order-place]: https://gateway.docs.projectx.com/docs/api-reference/order/order-place/
+[order-modify]: https://gateway.docs.projectx.com/docs/api-reference/order/order-modify/
+[order-cancel]: https://gateway.docs.projectx.com/docs/api-reference/order/order-cancel/
 
 ### Complete working-order reconciliation
 
