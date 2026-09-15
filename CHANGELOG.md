@@ -26,6 +26,12 @@ first public release.
   stay `None`, and the provider's free-form `errorMessage` is still discarded as untrusted remote
   text.
 
+### Security
+
+- Update the locked `rustls` resolution from 0.23.43 to 0.23.45 for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285), together with the
+  `aws-lc-rs`, `aws-lc-sys`, and `rustls-webpki` resolutions that release requires.
+
 ## [3.0.1] - 2026-09-14
 
 ### Fixed
