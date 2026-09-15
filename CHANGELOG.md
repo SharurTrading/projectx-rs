@@ -21,7 +21,7 @@ first public release.
 
 - Report the provider's published error-code text on REST rejections. `ProviderError` gains `name`,
   `Error::AmbiguousMutation` gains `code` and `name`, and the credential and session-validation
-  rejections carry it as well. Code text is per endpoint: code `2` is `OrderRejected` from
+  rejection variants carry it as well. Code text is per endpoint: code `2` is `OrderRejected` from
   `/api/Order/place` and `OrderNotFound` from `/api/Order/cancel`. Undocumented and future codes
   stay `None`, and the provider's free-form `errorMessage` is still discarded as untrusted remote
   text.

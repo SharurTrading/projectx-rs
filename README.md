@@ -117,13 +117,16 @@ as well as future codes this crate does not recognize, return `Error::AmbiguousM
 provider state before retrying. Only endpoint-specific codes documented as definitive rejections
 return `Error::Provider`.
 
-Every provider rejection reaches the caller with the code text the provider publishes for the
-responding endpoint, not just a number: `ProviderError::name` carries it, and
+The error variants that preserve a provider code also expose the code text the provider publishes
+for the responding endpoint, not just a number: `ProviderError::name` carries it, and
 `Error::AmbiguousMutation`, `Error::CredentialsRejected`, and `Error::SessionValidationRejected`
 carry it alongside their code. The same number means different things to different endpoints, so
 `Error::Provider` for code `2` is `OrderRejected` from `Client::place_order` and `OrderNotFound`
-from `Client::cancel_order`. Codes the provider does not document stay `None`. The provider's
-free-form `errorMessage` remains untrusted remote text and is never exposed or logged.
+from `Client::cancel_order`. Codes the provider does not document stay `None`, and so does any
+outcome the client cannot attribute to one provider rejection: session validation returns the unit
+`Error::AmbiguousSessionValidation` for every code outside its three definitive rejections, and
+that variant carries no code. The provider's free-form `errorMessage` remains untrusted remote text
+and is never exposed or logged.
 
 ### Trailing stops and bracket settings
 
