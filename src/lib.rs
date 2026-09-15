@@ -32,6 +32,7 @@ mod config;
 mod credentials;
 mod decimal_serde;
 mod error;
+mod error_codes;
 mod ids;
 mod models;
 mod rate_limit;

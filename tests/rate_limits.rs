@@ -270,7 +270,8 @@ async fn provider_rate_limit_after_mutation_send_is_ambiguous_and_never_retried(
     assert!(matches!(
         error,
         Error::AmbiguousMutation {
-            operation: "order placement"
+            operation: "order placement",
+            ..
         }
     ));
     placement.assert_calls_async(1).await;

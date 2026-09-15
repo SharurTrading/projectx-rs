@@ -117,6 +117,14 @@ as well as future codes this crate does not recognize, return `Error::AmbiguousM
 provider state before retrying. Only endpoint-specific codes documented as definitive rejections
 return `Error::Provider`.
 
+Every provider rejection reaches the caller with the code text the provider publishes for the
+responding endpoint, not just a number: `ProviderError::name` carries it, and
+`Error::AmbiguousMutation`, `Error::CredentialsRejected`, and `Error::SessionValidationRejected`
+carry it alongside their code. The same number means different things to different endpoints, so
+`Error::Provider` for code `2` is `OrderRejected` from `Client::place_order` and `OrderNotFound`
+from `Client::cancel_order`. Codes the provider does not document stay `None`. The provider's
+free-form `errorMessage` remains untrusted remote text and is never exposed or logged.
+
 ### Trailing stops and bracket settings
 
 For `OrderType::TrailingStop`, placement requires `.trail_price(Decimal)` containing an absolute
@@ -131,10 +139,10 @@ modification has no such limit. See the [placement][order-place] and [modificati
 references. The builders preserve exact decimal inputs and leave quote-dependent checks to the server.
 
 Attaching either bracket leg requires Auto OCO Brackets in the account's platform risk settings.
-Position Brackets mode produces placement code `2` and can still return an ID for the rejected
-record; the client correctly returns `Error::Provider`. [Cancellation][order-cancel] is supported
-only for simulated accounts that are not copy-trading followers; other accounts receive code `6`.
-Provider errors expose the numeric code and intentionally discard untrusted remote error messages.
+Position Brackets mode produces placement code `2` (`OrderRejected`) and can still return an ID for
+the rejected record; the client correctly returns `Error::Provider`. [Cancellation][order-cancel] is
+supported only for simulated accounts that are not copy-trading followers; other accounts receive
+code `6` (`AccountRejected`).
 
 [order-place]: https://gateway.docs.projectx.com/docs/api-reference/order/order-place/
 [order-modify]: https://gateway.docs.projectx.com/docs/api-reference/order/order-modify/

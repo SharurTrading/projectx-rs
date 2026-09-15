@@ -8,6 +8,24 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Breaking changes
+
+- Carry the provider's published code text on every error that reports a provider code:
+  `Error::AmbiguousMutation` gains `code` and `name`, and `Error::CredentialsRejected` and
+  `Error::SessionValidationRejected` gain `name`. An ambiguous money-moving outcome therefore keeps
+  the provider's rejection code instead of only the operation name.
+
+### Added
+
+- Report the provider's published error-code text on REST rejections. `ProviderError` gains `name`,
+  `Error::AmbiguousMutation` gains `code` and `name`, and the credential and session-validation
+  rejections carry it as well. Code text is per endpoint: code `2` is `OrderRejected` from
+  `/api/Order/place` and `OrderNotFound` from `/api/Order/cancel`. Undocumented and future codes
+  stay `None`, and the provider's free-form `errorMessage` is still discarded as untrusted remote
+  text.
+
 ## [3.0.1] - 2026-09-14
 
 ### Fixed
