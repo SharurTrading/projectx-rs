@@ -726,6 +726,11 @@ impl Client {
 
     /// Closes the open position for an explicit account and contract exactly once.
     ///
+    /// The provider closes with a market order. A rejection carries the code
+    /// text `/api/Position/closeContract` publishes: code `5` is
+    /// `OrderRejected`, so the close did not execute, and code `8` is
+    /// `AccountRejected`, which the provider returns for live accounts.
+    ///
     /// This method never retries. If the provider may have admitted the
     /// request but no trustworthy result is available, it returns
     /// [`Error::AmbiguousMutation`]. Reconcile provider state before retrying.
@@ -742,6 +747,18 @@ impl Client {
     }
 
     /// Partially closes an open position for an account and contract exactly once.
+    ///
+    /// The provider closes with a market order. A rejection carries the code
+    /// text `/api/Position/partialCloseContract` publishes: code `5` is
+    /// `InvalidCloseSize`, which the provider also returns when `size` exceeds
+    /// the open position, code `6` is `OrderRejected`, and code `9` is
+    /// `AccountRejected`, which the provider returns for live accounts.
+    /// The [partial-close reference](https://gateway.docs.projectx.com/docs/api-reference/positions/close-positions-partial/)
+    /// documents that code `6` covers both a symbol that is not tradable at the
+    /// moment and a contract without a current price: the provider records the
+    /// closing order as rejected and returns a null `errorMessage` for both, so
+    /// the response cannot say which cause applied. Retry once the market is
+    /// open and quoting.
     ///
     /// This method never retries. If the provider may have admitted the
     /// request but no trustworthy result is available, it returns

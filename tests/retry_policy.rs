@@ -1065,6 +1065,62 @@ async fn endpoint_mutation_codes_distinguish_ambiguous_from_definitive_outcomes(
 }
 
 #[tokio::test]
+async fn documented_position_close_rejections_carry_their_published_names() {
+    let (address, server) = start_server(vec![
+        (
+            200,
+            r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
+        ),
+        // /api/Position/closeContract: OrderRejected, then AccountRejected.
+        (200, r#"{"success":false,"errorCode":5}"#),
+        (200, r#"{"success":false,"errorCode":8}"#),
+        // /api/Position/partialCloseContract: InvalidCloseSize, OrderRejected,
+        // then AccountRejected.
+        (200, r#"{"success":false,"errorCode":5}"#),
+        (200, r#"{"success":false,"errorCode":6}"#),
+        (200, r#"{"success":false,"errorCode":9}"#),
+    ])
+    .await;
+    let client = client(address, 0);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
+    let requests = mutation_requests();
+
+    assert_definitive_provider_rejection(
+        client.close_contract(&requests.close).await,
+        5,
+        "OrderRejected",
+    );
+    assert_definitive_provider_rejection(
+        client.close_contract(&requests.close).await,
+        8,
+        "AccountRejected",
+    );
+    assert_definitive_provider_rejection(
+        client.partial_close_contract(&requests.partial_close).await,
+        5,
+        "InvalidCloseSize",
+    );
+    assert_definitive_provider_rejection(
+        client.partial_close_contract(&requests.partial_close).await,
+        6,
+        "OrderRejected",
+    );
+    assert_definitive_provider_rejection(
+        client.partial_close_contract(&requests.partial_close).await,
+        9,
+        "AccountRejected",
+    );
+
+    let count = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert_eq!(count, 6);
+}
+
+#[tokio::test]
 async fn documented_order_rejections_remain_definitive_even_with_an_order_id() {
     let (address, server) = start_server(vec![
         (200, r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#),
