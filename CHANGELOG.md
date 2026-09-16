@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [4.0.0] - 2026-09-17
 
 ### Breaking changes
 
@@ -192,7 +192,8 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...v4.0.0
 [3.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v2.0.0...v2.1.0
