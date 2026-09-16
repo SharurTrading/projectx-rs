@@ -3,19 +3,61 @@
 
 //! Error types.
 
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use thiserror::Error;
 
 use crate::RateLimitKind;
 
 /// A provider-declared failed operation.
+///
+/// The provider names every code it publishes, and the same number means
+/// different things to different endpoints: code `2` is `OrderRejected` for
+/// `/api/Order/place` and `OrderNotFound` for `/api/Order/cancel`. [`Self::name`]
+/// carries the published text for the endpoint that produced the rejection.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[non_exhaustive]
-#[error("ProjectX rejected the operation (code: {code})")]
+#[error("ProjectX rejected the operation ({})", CodeText { code: *code, name: *name })]
 pub struct ProviderError {
     /// Provider error code.
     pub code: i32,
+    /// Provider-published name for [`Self::code`], when the endpoint's
+    /// published error-code table defines it.
+    ///
+    /// Undocumented codes, including codes the provider adds after this crate
+    /// was published, are `None`. The provider's free-form `errorMessage` is
+    /// untrusted remote text and is never exposed here.
+    pub name: Option<&'static str>,
+}
+
+/// Renders a provider error code together with its published name.
+#[derive(Clone, Copy, Debug)]
+struct CodeText {
+    code: i32,
+    name: Option<&'static str>,
+}
+
+impl fmt::Display for CodeText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.name {
+            Some(name) => write!(formatter, "code: {} {name}", self.code),
+            None => write!(formatter, "code: {}", self.code),
+        }
+    }
+}
+
+/// Renders the provider code of an ambiguous outcome, or nothing when the
+/// outcome never produced a decodable provider response.
+#[derive(Clone, Copy, Debug)]
+struct AmbiguousCodeText(Option<CodeText>);
+
+impl fmt::Display for AmbiguousCodeText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(code) => write!(formatter, " ({code})"),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Errors returned by the `ProjectX` client.
@@ -34,18 +76,30 @@ pub enum Error {
         reason: &'static str,
     },
     /// The provider rejected the supplied authentication credentials.
-    #[error("provider rejected the credentials (code: {code})")]
+    #[error("provider rejected the credentials ({})", CodeText { code: *code, name: *name })]
     CredentialsRejected {
         /// Public provider rejection code.
         code: i32,
+        /// Provider-published name for `code`, when `/api/Auth/loginKey` and
+        /// `/api/Auth/loginApp` publish one for it.
+        name: Option<&'static str>,
     },
     /// The provider rejected validation of the current session.
-    #[error("provider rejected session validation (code: {code})")]
+    #[error(
+        "provider rejected session validation ({})",
+        CodeText { code: *code, name: *name }
+    )]
     SessionValidationRejected {
         /// Public provider rejection code.
         code: i32,
+        /// Provider-published name for `code`, when `/api/Auth/validate`
+        /// publishes one for it.
+        name: Option<&'static str>,
     },
     /// The provider's success flag and required error code disagreed.
+    ///
+    /// The provider did not declare a rejection, so this reports the
+    /// contradictory pair as received instead of naming a rejection code.
     #[error("provider returned inconsistent status (success: {success}, code: {code})")]
     InconsistentResponseStatus {
         /// Provider success flag.
@@ -114,10 +168,24 @@ pub enum Error {
     Encode(#[source] serde_json::Error),
     /// A money-moving mutation may have reached the provider but did not
     /// produce a trustworthy response.
-    #[error("{operation} outcome is ambiguous; reconcile provider state before retrying")]
+    ///
+    /// A decoded provider rejection that is documented as pending, unknown, or
+    /// otherwise not a definitive rejection stays ambiguous, and carries the
+    /// provider's code and published name so the caller can tell
+    /// `OrderPending` apart from an unrecognized future code.
+    #[error(
+        "{} outcome is ambiguous{}; reconcile provider state before retrying",
+        operation,
+        AmbiguousCodeText(code.map(|code| CodeText { code, name: *name }))
+    )]
     AmbiguousMutation {
         /// Public-safe operation name.
         operation: &'static str,
+        /// Provider error code, when a provider rejection was decoded.
+        code: Option<i32>,
+        /// Provider-published name for `code`, when the endpoint's published
+        /// error-code table defines it.
+        name: Option<&'static str>,
     },
     /// A library-owned background task terminated unexpectedly.
     #[error("{task} background task terminated unexpectedly")]

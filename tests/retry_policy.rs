@@ -165,10 +165,24 @@ fn assert_ambiguous_mutation<T>(
     result: Result<T, Error>,
     expected_operation: &'static str,
     provider_code: i32,
+    expected_name: Option<&'static str>,
 ) {
     match result {
-        Err(Error::AmbiguousMutation { operation }) => {
+        Err(Error::AmbiguousMutation {
+            operation,
+            code,
+            name,
+        }) => {
             assert_eq!(operation, expected_operation);
+            assert_eq!(
+                code,
+                Some(provider_code),
+                "ambiguous {expected_operation} must keep the provider code"
+            );
+            assert_eq!(
+                name, expected_name,
+                "ambiguous {expected_operation} must keep the published code text"
+            );
         }
         Err(error) => {
             panic!("expected ambiguous {expected_operation} for code {provider_code}, got {error}")
@@ -179,9 +193,20 @@ fn assert_ambiguous_mutation<T>(
     }
 }
 
-fn assert_definitive_provider_rejection<T>(result: Result<T, Error>, expected_code: i32) {
+fn assert_definitive_provider_rejection<T>(
+    result: Result<T, Error>,
+    expected_code: i32,
+    expected_name: &'static str,
+) {
     match result {
-        Err(Error::Provider(ProviderError { code, .. })) => assert_eq!(code, expected_code),
+        Err(Error::Provider(ProviderError { code, name, .. })) => {
+            assert_eq!(code, expected_code);
+            assert_eq!(
+                name,
+                Some(expected_name),
+                "provider rejection {expected_code} must keep the published code text"
+            );
+        }
         Err(error) => panic!("expected provider rejection {expected_code}, got {error}"),
         Ok(_) => panic!("expected provider rejection {expected_code}, got success"),
     }
@@ -544,7 +569,11 @@ async fn delayed_terminal_rejection_cannot_invalidate_a_new_session() {
 
     assert!(matches!(
         rejection,
-        Err(Error::SessionValidationRejected { code: 2 })
+        Err(Error::SessionValidationRejected {
+            code: 2,
+            name: Some("SessionNotFound"),
+            ..
+        })
     ));
     assert!(
         query
@@ -857,10 +886,139 @@ async fn inconsistent_mutation_status_is_an_ambiguous_outcome() {
     assert!(matches!(
         result,
         Err(Error::AmbiguousMutation {
-            operation: "order placement"
+            operation: "order placement",
+            ..
         })
     ));
     assert_eq!(count, 2);
+}
+
+/// Every supported money-moving request, built once for code-policy fixtures.
+struct MutationRequests {
+    place: PlaceOrder,
+    cancel: CancelOrder,
+    modify: ModifyOrder,
+    close: CloseContract,
+    partial_close: PartialCloseContract,
+}
+
+fn mutation_requests() -> MutationRequests {
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    let order_id =
+        OrderId::new(84).unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
+    MutationRequests {
+        place: PlaceOrder::builder(
+            account_id,
+            contract_id.clone(),
+            OrderType::Market,
+            Side::Bid,
+            1,
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}")),
+        cancel: CancelOrder {
+            account_id,
+            order_id,
+        },
+        modify: ModifyOrder::builder(account_id, order_id)
+            .size(1)
+            .build()
+            .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}")),
+        close: CloseContract {
+            account_id,
+            contract_id: contract_id.clone(),
+        },
+        partial_close: PartialCloseContract::new(account_id, contract_id, 1)
+            .unwrap_or_else(|error| panic!("fixture partial close must be valid: {error}")),
+    }
+}
+
+/// Asserts each documented mutation code, in the order the fixture serves it.
+async fn assert_mutation_code_policy(client: &Client, requests: &MutationRequests) {
+    for (code, name) in [
+        (6, Some("OrderPending")),
+        (7, Some("UnknownError")),
+        (99, None),
+    ] {
+        assert_ambiguous_mutation(
+            client.place_order(&requests.place).await,
+            "order placement",
+            code,
+            name,
+        );
+    }
+    assert_definitive_provider_rejection(
+        client.place_order(&requests.place).await,
+        1,
+        "AccountNotFound",
+    );
+
+    for (code, name) in [(4, Some("Pending")), (5, Some("UnknownError")), (99, None)] {
+        assert_ambiguous_mutation(
+            client.cancel_order(&requests.cancel).await,
+            "order cancellation",
+            code,
+            name,
+        );
+    }
+    assert_definitive_provider_rejection(
+        client.cancel_order(&requests.cancel).await,
+        1,
+        "AccountNotFound",
+    );
+
+    for (code, name) in [(4, Some("Pending")), (5, Some("UnknownError")), (99, None)] {
+        assert_ambiguous_mutation(
+            client.modify_order(&requests.modify).await,
+            "order modification",
+            code,
+            name,
+        );
+    }
+    assert_definitive_provider_rejection(
+        client.modify_order(&requests.modify).await,
+        1,
+        "AccountNotFound",
+    );
+
+    for (code, name) in [
+        (6, Some("OrderPending")),
+        (7, Some("UnknownError")),
+        (99, None),
+    ] {
+        assert_ambiguous_mutation(
+            client.close_contract(&requests.close).await,
+            "position close",
+            code,
+            name,
+        );
+    }
+    assert_definitive_provider_rejection(
+        client.close_contract(&requests.close).await,
+        1,
+        "AccountNotFound",
+    );
+
+    for (code, name) in [
+        (7, Some("OrderPending")),
+        (8, Some("UnknownError")),
+        (99, None),
+    ] {
+        assert_ambiguous_mutation(
+            client.partial_close_contract(&requests.partial_close).await,
+            "partial position close",
+            code,
+            name,
+        );
+    }
+    assert_definitive_provider_rejection(
+        client.partial_close_contract(&requests.partial_close).await,
+        1,
+        "AccountNotFound",
+    );
 }
 
 #[tokio::test]
@@ -898,72 +1056,7 @@ async fn endpoint_mutation_codes_distinguish_ambiguous_from_definitive_outcomes(
         .await
         .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
 
-    let account_id =
-        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
-    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
-        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
-    let order_id =
-        OrderId::new(84).unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
-    let place = PlaceOrder::builder(
-        account_id,
-        contract_id.clone(),
-        OrderType::Market,
-        Side::Bid,
-        1,
-    )
-    .build()
-    .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}"));
-    let cancel = CancelOrder {
-        account_id,
-        order_id,
-    };
-    let modify = ModifyOrder::builder(account_id, order_id)
-        .size(1)
-        .build()
-        .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
-    let close = CloseContract {
-        account_id,
-        contract_id: contract_id.clone(),
-    };
-    let partial_close = PartialCloseContract::new(account_id, contract_id, 1)
-        .unwrap_or_else(|error| panic!("fixture partial close must be valid: {error}"));
-
-    for code in [6, 7, 99] {
-        assert_ambiguous_mutation(client.place_order(&place).await, "order placement", code);
-    }
-    assert_definitive_provider_rejection(client.place_order(&place).await, 1);
-
-    for code in [4, 5, 99] {
-        assert_ambiguous_mutation(
-            client.cancel_order(&cancel).await,
-            "order cancellation",
-            code,
-        );
-    }
-    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 1);
-
-    for code in [4, 5, 99] {
-        assert_ambiguous_mutation(
-            client.modify_order(&modify).await,
-            "order modification",
-            code,
-        );
-    }
-    assert_definitive_provider_rejection(client.modify_order(&modify).await, 1);
-
-    for code in [6, 7, 99] {
-        assert_ambiguous_mutation(client.close_contract(&close).await, "position close", code);
-    }
-    assert_definitive_provider_rejection(client.close_contract(&close).await, 1);
-
-    for code in [7, 8, 99] {
-        assert_ambiguous_mutation(
-            client.partial_close_contract(&partial_close).await,
-            "partial position close",
-            code,
-        );
-    }
-    assert_definitive_provider_rejection(client.partial_close_contract(&partial_close).await, 1);
+    assert_mutation_code_policy(&client, &mutation_requests()).await;
 
     let count = server
         .await
@@ -997,19 +1090,19 @@ async fn documented_order_rejections_remain_definitive_even_with_an_order_id() {
         .stop_loss_bracket(stop_loss)
         .build()
         .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}"));
-    assert_definitive_provider_rejection(client.place_order(&place).await, 2);
+    assert_definitive_provider_rejection(client.place_order(&place).await, 2, "OrderRejected");
 
     let cancel = CancelOrder {
         account_id,
         order_id,
     };
-    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6);
-    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6);
+    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6, "AccountRejected");
+    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6, "AccountRejected");
     let modify = ModifyOrder::builder(account_id, order_id)
         .trail_price(Decimal::new(10_401, 2))
         .build()
         .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
-    assert_definitive_provider_rejection(client.modify_order(&modify).await, 3);
+    assert_definitive_provider_rejection(client.modify_order(&modify).await, 3, "Rejected");
     let count = server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
@@ -1040,7 +1133,11 @@ async fn terminal_validation_rejection_invalidates_the_session() {
 
     assert!(matches!(
         rejected,
-        Err(Error::SessionValidationRejected { code: 3 })
+        Err(Error::SessionValidationRejected {
+            code: 3,
+            name: Some("ExpiredToken"),
+            ..
+        })
     ));
     assert!(matches!(after_invalidation, Err(Error::NotAuthenticated)));
     assert_eq!(count, 2);
@@ -1252,7 +1349,11 @@ async fn validator_exposes_terminal_session_failure() {
 
     assert!(matches!(
         result,
-        Err(Error::SessionValidationRejected { code: 1 })
+        Err(Error::SessionValidationRejected {
+            code: 1,
+            name: Some("InvalidSession"),
+            ..
+        })
     ));
     assert_eq!(count, 2);
 }
@@ -1325,7 +1426,8 @@ async fn order_placement_never_retries_a_server_response() {
     assert!(matches!(
         result,
         Err(Error::AmbiguousMutation {
-            operation: "order placement"
+            operation: "order placement",
+            ..
         })
     ));
     assert_eq!(count, 2);
@@ -1362,7 +1464,8 @@ async fn accepted_order_without_an_id_is_an_ambiguous_outcome() {
     assert!(matches!(
         result,
         Err(Error::AmbiguousMutation {
-            operation: "order placement"
+            operation: "order placement",
+            ..
         })
     ));
     assert_eq!(count, 2);

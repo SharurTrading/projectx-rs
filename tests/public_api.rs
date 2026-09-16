@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use httpmock::prelude::*;
 use projectx_client::{
-    AccountId, ApplicationCredentials, BarUnit, Bracket, Client, ContractId, Credentials, Decimal,
-    Endpoints, Error, HistoryRequest, ModifyOrder, OrderId, OrderStatus, OrderType,
-    PartialCloseContract, PlaceOrder, RequestValidationError, Side, Timestamp, TradeLogType,
+    AccountId, ApplicationCredentials, BarUnit, Bracket, CancelOrder, Client, ContractId,
+    Credentials, Decimal, Endpoints, Error, HistoryRequest, ModifyOrder, OrderId, OrderStatus,
+    OrderType, PartialCloseContract, PlaceOrder, RequestValidationError, Side, Timestamp,
+    TradeLogType,
 };
 use serde_json::json;
 
@@ -542,8 +543,147 @@ async fn bodyless_provider_rejection_is_a_typed_provider_error() {
     accounts.assert_async().await;
     assert!(matches!(
         result,
-        Err(Error::Provider(provider_error)) if provider_error.code == 17
+        Err(Error::Provider(provider_error))
+            if provider_error.code == 17 && provider_error.name.is_none()
     ));
+}
+
+#[tokio::test]
+async fn rejected_credentials_report_the_published_login_code_text() {
+    let server = MockServer::start_async().await;
+    let _login = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": false, "errorCode": 1, "errorMessage": null}));
+        })
+        .await;
+
+    let client = fixture_client(&server);
+    let Err(rejection) = client.authenticate().await else {
+        panic!("a rejected login must fail");
+    };
+
+    assert!(matches!(
+        rejection,
+        Error::CredentialsRejected {
+            code: 1,
+            name: Some("UserNotFound"),
+        }
+    ));
+    assert_eq!(
+        rejection.to_string(),
+        "provider rejected the credentials (code: 1 UserNotFound)"
+    );
+}
+
+#[tokio::test]
+async fn provider_rejection_text_is_the_endpoints_published_code_name() {
+    let server = MockServer::start_async().await;
+    let _login = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let placement = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/place");
+            then.status(200).json_body(json!({
+                "orderId": 84,
+                "success": false,
+                "errorCode": 2,
+                "errorMessage": "Brackets cannot be used with Position Brackets."
+            }));
+        })
+        .await;
+    let cancellation = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/cancel");
+            then.status(200).json_body(json!({
+                "success": false,
+                "errorCode": 2,
+                "errorMessage": "Follower accounts cannot cancel orders"
+            }));
+        })
+        .await;
+    let modification = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/modify");
+            then.status(200)
+                .json_body(json!({"success": false, "errorCode": 4, "errorMessage": null}));
+        })
+        .await;
+
+    let client = fixture_client(&server);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture login must succeed: {error}"));
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+    let order_id =
+        OrderId::new(84).unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
+    let place = PlaceOrder::builder(account_id, contract_id, OrderType::Market, Side::Bid, 1)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}"));
+    let modify = ModifyOrder::builder(account_id, order_id)
+        .size(1)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
+
+    // Code 2 is published as a different name by each endpoint.
+    let Err(rejection) = client.place_order(&place).await else {
+        panic!("a definitive placement rejection must fail");
+    };
+    assert!(matches!(
+        rejection,
+        Error::Provider(ref provider_error)
+            if provider_error.name == Some("OrderRejected")
+    ));
+    assert_eq!(
+        rejection.to_string(),
+        "ProjectX rejected the operation (code: 2 OrderRejected)"
+    );
+
+    let Err(rejection) = client
+        .cancel_order(&CancelOrder {
+            account_id,
+            order_id,
+        })
+        .await
+    else {
+        panic!("a definitive cancellation rejection must fail");
+    };
+    assert!(matches!(
+        rejection,
+        Error::Provider(ref provider_error)
+            if provider_error.name == Some("OrderNotFound")
+    ));
+
+    // A documented pending outcome stays ambiguous, and still reports the code.
+    let Err(rejection) = client.modify_order(&modify).await else {
+        panic!("a pending modification outcome must stay ambiguous");
+    };
+    assert!(matches!(
+        rejection,
+        Error::AmbiguousMutation {
+            operation: "order modification",
+            code: Some(4),
+            name: Some("Pending"),
+        }
+    ));
+    assert_eq!(
+        rejection.to_string(),
+        "order modification outcome is ambiguous (code: 4 Pending); reconcile provider state before retrying"
+    );
+
+    placement.assert_async().await;
+    cancellation.assert_async().await;
+    modification.assert_async().await;
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ use crate::{
     Position, ProviderError, RateLimitConfig, RateLimitKind, RealtimeClient, SearchContracts,
     Trade, TradeQuery, TradeSearch,
     credentials::AuthenticationCredentials,
+    error_codes::ErrorCodeTable,
     models::{
         AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrderBody,
         OrdersBody, PlaceOrderBody, PositionsBody, TradesBody,
@@ -254,6 +255,7 @@ impl Client {
         if !response.success {
             return Err(Error::CredentialsRejected {
                 code: response.error_code,
+                name: ErrorCodeTable::Login.name(response.error_code),
             });
         }
         let token = validate_token(response.token.as_deref())?;
@@ -403,7 +405,7 @@ impl Client {
             });
         }
         let response: Envelope<EmptyBody> = self.decode(response).await?;
-        accepted(response)?;
+        accepted(response, ErrorCodeTable::Logout)?;
         Ok(OperationResponse)
     }
 
@@ -442,6 +444,7 @@ impl Client {
         if !response.success {
             let error = Error::SessionValidationRejected {
                 code: response.error_code,
+                name: ErrorCodeTable::Validate.name(response.error_code),
             };
             if matches!(response.error_code, 1..=3) {
                 return Err(error);
@@ -498,7 +501,7 @@ impl Client {
                 },
             )
             .await?;
-        Ok(accepted(response)?.accounts)
+        Ok(accepted(response, ErrorCodeTable::SuccessOnly)?.accounts)
     }
 
     /// Lists contracts available to the selected live or simulated data feed.
@@ -514,7 +517,7 @@ impl Client {
                 &AvailableContractsRequest { live },
             )
             .await?;
-        Ok(accepted(response)?.contracts)
+        Ok(accepted(response, ErrorCodeTable::SuccessOnly)?.contracts)
     }
 
     /// Searches contracts using provider-native search text.
@@ -531,7 +534,7 @@ impl Client {
         let response: Envelope<ContractsBody> = self
             .post_authenticated(RateLimitKind::General, "api/Contract/search", request)
             .await?;
-        Ok(accepted(response)?.contracts)
+        Ok(accepted(response, ErrorCodeTable::SuccessOnly)?.contracts)
     }
 
     /// Retrieves one contract by its explicit provider identifier.
@@ -547,7 +550,7 @@ impl Client {
                 &ContractRequest { contract_id },
             )
             .await?;
-        Ok(accepted(response)?.contract)
+        Ok(accepted(response, ErrorCodeTable::ContractSearchById)?.contract)
     }
 
     /// Retrieves historical bars for an explicit provider contract.
@@ -559,7 +562,7 @@ impl Client {
         let response: Envelope<BarsBody> = self
             .post_authenticated(RateLimitKind::History, "api/History/retrieveBars", request)
             .await?;
-        Ok(accepted(response)?.bars)
+        Ok(accepted(response, ErrorCodeTable::Bars)?.bars)
     }
 
     /// Searches historical orders for an account and time range.
@@ -571,7 +574,7 @@ impl Client {
         let response: Envelope<OrdersBody> = self
             .post_authenticated(RateLimitKind::General, "api/Order/search", request)
             .await?;
-        Ok(accepted(response)?.orders)
+        Ok(accepted(response, ErrorCodeTable::OrderSearch)?.orders)
     }
 
     /// Retrieves one order by its provider account and order identifiers.
@@ -594,7 +597,7 @@ impl Client {
                 },
             )
             .await?;
-        Ok(accepted(response)?.order)
+        Ok(accepted(response, ErrorCodeTable::OrderSearchById)?.order)
     }
 
     /// Searches currently open orders for an account.
@@ -615,7 +618,7 @@ impl Client {
                 &AccountRequest { account_id },
             )
             .await?;
-        Ok(accepted(response)?.orders)
+        Ok(accepted(response, ErrorCodeTable::OrderSearch)?.orders)
     }
 
     /// Queries filtered orders through `/api/Order/v2/query`.
@@ -636,7 +639,7 @@ impl Client {
         let response: Envelope<OrderPage> = self
             .post_authenticated(RateLimitKind::General, "api/Order/v2/query", request)
             .await?;
-        accepted(response)
+        accepted(response, ErrorCodeTable::OrderSearch)
     }
 
     /// Places an order exactly once.
@@ -657,9 +660,12 @@ impl Client {
             .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
-        let body = accepted(response).map_err(|error| ambiguous_mutation(kind, error))?;
+        let body = accepted(response, kind.error_code_table())
+            .map_err(|error| ambiguous_mutation(kind, error))?;
         let order_id = body.order_id.ok_or(Error::AmbiguousMutation {
             operation: kind.operation(),
+            code: None,
+            name: None,
         })?;
         Ok(OrderResponse { order_id })
     }
@@ -715,7 +721,7 @@ impl Client {
                 &AccountRequest { account_id },
             )
             .await?;
-        Ok(accepted(response)?.positions)
+        Ok(accepted(response, ErrorCodeTable::PositionSearch)?.positions)
     }
 
     /// Closes the open position for an explicit account and contract exactly once.
@@ -762,7 +768,7 @@ impl Client {
         let response: Envelope<TradesBody> = self
             .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
             .await?;
-        Ok(accepted(response)?.trades)
+        Ok(accepted(response, ErrorCodeTable::TradeSearch)?.trades)
     }
 
     /// Searches trades with optional start and end timestamp bounds.
@@ -777,7 +783,7 @@ impl Client {
         let response: Envelope<TradesBody> = self
             .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
             .await?;
-        Ok(accepted(response)?.trades)
+        Ok(accepted(response, ErrorCodeTable::TradeSearch)?.trades)
     }
 
     async fn mutation<T>(&self, kind: MutationKind, request: &T) -> Result<OperationResponse, Error>
@@ -788,7 +794,8 @@ impl Client {
             .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
-        accepted(response).map_err(|error| ambiguous_mutation(kind, error))?;
+        accepted(response, kind.error_code_table())
+            .map_err(|error| ambiguous_mutation(kind, error))?;
         Ok(OperationResponse)
     }
 
@@ -1348,10 +1355,16 @@ impl ClientBuilder {
     }
 }
 
-fn accepted<T>(response: Envelope<T>) -> Result<T, Error> {
+/// Accepts a decoded provider envelope, naming any rejection with the code
+/// text the provider publishes for the responding endpoint.
+fn accepted<T>(response: Envelope<T>, codes: ErrorCodeTable) -> Result<T, Error> {
     match response {
         Envelope::Accepted(body) => Ok(body),
-        Envelope::Rejected { error_code } => Err(ProviderError { code: error_code }.into()),
+        Envelope::Rejected { error_code } => Err(ProviderError {
+            code: error_code,
+            name: codes.name(error_code),
+        }
+        .into()),
         Envelope::InconsistentStatus {
             success,
             error_code,
@@ -1406,7 +1419,7 @@ fn is_terminal_session_error(error: &Error) -> bool {
             | Error::Decode(_)
             | Error::InconsistentResponseStatus { .. }
             | Error::UnexpectedStatus { status: 401 }
-            | Error::SessionValidationRejected { code: 1..=3 }
+            | Error::SessionValidationRejected { code: 1..=3, .. }
     )
 }
 
@@ -1461,6 +1474,16 @@ impl MutationKind {
         }
     }
 
+    const fn error_code_table(self) -> ErrorCodeTable {
+        match self {
+            Self::OrderPlacement => ErrorCodeTable::OrderPlacement,
+            Self::OrderCancellation => ErrorCodeTable::OrderCancellation,
+            Self::OrderModification => ErrorCodeTable::OrderModification,
+            Self::PositionClose => ErrorCodeTable::PositionClose,
+            Self::PartialPositionClose => ErrorCodeTable::PartialPositionClose,
+        }
+    }
+
     const fn is_definitive_rejection(self, code: i32) -> bool {
         // These are the endpoint-specific, documented rejection-only codes.
         // Pending, unknown, zero-in-a-rejection, and future codes deliberately
@@ -1477,7 +1500,14 @@ impl MutationKind {
 
 fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
     match error {
-        Error::Provider(ref provider) if kind.is_definitive_rejection(provider.code) => error,
+        Error::Provider(provider) if kind.is_definitive_rejection(provider.code) => {
+            Error::Provider(provider)
+        }
+        Error::Provider(provider) => Error::AmbiguousMutation {
+            operation: kind.operation(),
+            code: Some(provider.code),
+            name: provider.name,
+        },
         Error::NotAuthenticated
         | Error::UnexpectedStatus { status: 401 }
         | Error::Configuration(_)
@@ -1485,6 +1515,8 @@ fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
         | Error::LocallyRateLimited { .. } => error,
         _ => Error::AmbiguousMutation {
             operation: kind.operation(),
+            code: None,
+            name: None,
         },
     }
 }
@@ -1786,6 +1818,34 @@ mod tests {
                 assert!(
                     !kind.is_definitive_rejection(code),
                     "{kind:?} code {code} must be ambiguous"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn published_mutation_code_names_agree_with_the_rejection_policy() {
+        // The provider documents pending and unknown outcomes as the only
+        // ambiguous rejections. Every other published code must therefore be
+        // definitive, and a definitive rejection must always have published
+        // code text to report.
+        const AMBIGUOUS_NAMES: &[&str] = &["Pending", "OrderPending", "UnknownError"];
+
+        for kind in [
+            MutationKind::OrderPlacement,
+            MutationKind::OrderCancellation,
+            MutationKind::OrderModification,
+            MutationKind::PositionClose,
+            MutationKind::PartialPositionClose,
+        ] {
+            let table = kind.error_code_table();
+            for code in 1..=16 {
+                assert_eq!(
+                    kind.is_definitive_rejection(code),
+                    table
+                        .name(code)
+                        .is_some_and(|name| !AMBIGUOUS_NAMES.contains(&name)),
+                    "{kind:?} code {code} must be definitive exactly when its published name is neither pending nor unknown"
                 );
             }
         }
