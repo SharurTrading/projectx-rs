@@ -25,6 +25,11 @@ first public release.
   `/api/Order/place` and `OrderNotFound` from `/api/Order/cancel`. Undocumented and future codes
   stay `None`, and the provider's free-form `errorMessage` is still discarded as untrusted remote
   text.
+- Document the position-close rejection semantics the provider publishes. `Client::close_contract`
+  and `Client::partial_close_contract` report `OrderRejected`, `InvalidCloseSize`, and
+  `AccountRejected` for their own endpoints, and a partial close rejected with code `6` records a
+  rejected closing order without saying whether the symbol was untradable or the contract had no
+  price.
 
 ### Security
 

@@ -151,6 +151,26 @@ code `6` (`AccountRejected`).
 [order-modify]: https://gateway.docs.projectx.com/docs/api-reference/order/order-modify/
 [order-cancel]: https://gateway.docs.projectx.com/docs/api-reference/order/order-cancel/
 
+### Closing positions
+
+`Client::close_contract` closes a whole position and `Client::partial_close_contract` closes an
+explicit size, both with a provider market order. Each reports the code text its own endpoint
+publishes. For a [partial close][position-partial-close], code `5` is `InvalidCloseSize` (the
+provider also returns it when `size` exceeds the open position), code `6` is `OrderRejected`, and
+code `9` is `AccountRejected` for live accounts; a [full close][position-close] publishes code `5`
+as `OrderRejected` and code `8` as `AccountRejected`.
+
+A partial close that the provider rejects with code `6` covers two causes: a symbol that is not
+tradable at the moment, and a contract without a current price. The provider records the closing
+order as rejected and returns a null `errorMessage` for both, so the response does not say which
+cause applied. The client reports `OrderRejected` and the caller retries once the market is open and
+quoting. `OrderPending` and `UnknownError` instead stay `Error::AmbiguousMutation` because the
+provider may already have acted; those are codes `7` and `8` for a partial close and `6` and `7`
+for a full close.
+
+[position-close]: https://gateway.docs.projectx.com/docs/api-reference/positions/close-positions/
+[position-partial-close]: https://gateway.docs.projectx.com/docs/api-reference/positions/close-positions-partial/
+
 ### Complete working-order reconciliation
 
 The provider's legacy `search_open_orders` endpoint excludes `Suspended` orders. That omission is
