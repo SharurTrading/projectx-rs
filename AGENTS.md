@@ -77,6 +77,12 @@ domain translation.
   Promises such as "later", "out of scope", or "separate PR" do not count as tracking. An untracked
   follow-up is a `[BLOCKER]`. Filing an issue does not waive a blocker or major finding that requires
   changes before merge.
+- **PX-ATTRIBUTION-01:** Any GitHub content posted by an AI agent under the account's login must
+  disclose AI authorship and state the agent's exact model name. Covered content includes
+  pull-request and issue descriptions and comments, reviews and inline review comments,
+  discussions, release notes, and any other post or publication. Agents use the account holder's
+  login and speak on their behalf, so a generic label such as "an AI assistant" without the exact
+  model name is a violation. This binds coding and review agents equally.
 
 ## Rust API standards
 
