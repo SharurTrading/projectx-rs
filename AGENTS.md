@@ -84,6 +84,18 @@ domain translation.
   login and speak on their behalf, so a generic label such as "an AI assistant" without the exact
   model name is a violation. This binds coding and review agents equally.
 
+## Procedure rules
+
+- **PROC-ATTRIB:** An AI agent posting to GitHub under the operator's login — a PR description, an
+  issue, a comment or review reply, an inline comment, a release, any other publication — states the
+  EXACT MODEL that authored it in the artifact's own body; a footer line naming the model is the
+  usual shape. The post carries the operator's identity while speaking with the agent's judgment,
+  and a reader — the operator's future self, a reviewer, an auditor — is owed the distinction
+  between the operator's voice and the machine's. The attribution names the model identifier the
+  harness reports (e.g. `GLM-5.3`), never a generic "an AI" and never the harness or client
+  standing in the model's place, and it lives in the text every reader sees: a machine-readable
+  trailer the GitHub UI hides is not disclosure.
+
 ## Rust API standards
 
 - Public APIs are documented and use typed `thiserror` errors.
