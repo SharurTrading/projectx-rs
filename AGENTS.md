@@ -125,6 +125,17 @@ domain translation.
   label when the work is docs, and any other repository label is welcome; none of those is
   required. An issue missing one of the four is a finding on the next PR that touches it, and in
   the tracker it is a gap the operator is asked to fill rather than a state to leave standing.
+- **PROC-PR-TRIAGE:** A PR carries the same classification as the issue it closes, so the tracker
+  and the PR list read as one body of work: exactly one kind label (bug / enhancement / task,
+  matching what the diff changes), and the same Priority issue field set to its linked issue's
+  value — a PR is an issue to the field API, so a reviewer reads the value from the PR itself
+  rather than taking it on trust. The label is not redundant with the issue's type — native issue
+  types exist on issues only, so on a PR the kind label IS the type, and a PR that omits it is
+  unclassified however well its issue is labelled. The priority is INHERITED, never re-argued: a PR
+  whose value differs from its issue's is a finding, and a genuine disagreement is settled on the
+  issue, where the ladder lives. A PR closing no issue sets its own priority by that same ladder,
+  and says in its description why it closes none. The value is never restated as prose in the
+  description: one field, one home, and a copy could only be free to disagree with it.
 
 ## Rust API standards
 
