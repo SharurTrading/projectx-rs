@@ -8,6 +8,17 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Changed
+
+- Update the `jiff` lockfile resolution from 0.2.35 to 0.2.37 through
+  [#41](https://github.com/SharurTrading/projectx-rs/pull/41).
+- Refresh all `taiki-e/install-action` CI pins from v2.87.10 to v2.87.14 through
+  [#39](https://github.com/SharurTrading/projectx-rs/pull/39).
+- Refresh all `dtolnay/rust-toolchain` CI pins to the current `master` revision through
+  [#40](https://github.com/SharurTrading/projectx-rs/pull/40).
+
 ## [4.0.0] - 2026-09-17
 
 ### Breaking changes
