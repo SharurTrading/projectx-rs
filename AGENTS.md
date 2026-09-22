@@ -95,6 +95,36 @@ domain translation.
   harness reports (e.g. `GLM-5.3`), never a generic "an AI" and never the harness or client
   standing in the model's place, and it lives in the text every reader sees: a machine-readable
   trailer the GitHub UI hides is not disclosure.
+- **PROC-ISSUE-TRIAGE:** Every issue is classified when it is created, and a mis-classified one is
+  corrected whenever it is touched. Four things, all mandatory: the native issue type (exactly one
+  of Bug, Feature, Task), the kind label that spells it (bug / enhancement / task — a fixed 1:1
+  mapping onto the type, so a reader filtering by label and a reader filtering by type see the same
+  set of work), and the Priority ISSUE FIELD on the issue itself (Urgent / High / Medium / Low),
+  defined once at the ORGANIZATION level. It is an issue field — not a project field, and never a
+  label: the value travels with the issue instead of living on one board's item, it holds exactly
+  one value that is re-set as urgency changes rather than accumulating stale ones, and a label
+  would be free to disagree with it. It is read and written through the issue under ordinary repo
+  scope — GET/POST on the issue's issue-field-values, with the field id from the organization's
+  issue-fields — so a lane that can read the issue can read its priority, and no project scope is
+  involved. The priority ladder is: Urgent — the platform is wrong about money, orders, or account
+  state right now, or a live session is blocked; other work stops for it. High — it blocks the next
+  live session, or the next step of an active plan. Medium — ordinary work, and the DEFAULT: an
+  issue nobody has argued is urgent, high, or low is Medium, never unset. Low — polish, nits, and
+  anything deferrable without loss. The fourth is the difficulty label — exactly one of
+  `difficulty: hard` / `difficulty: medium` / `difficulty: easy` (operator direction 2026-09-18) —
+  and it routes the issue to the class of agent that should take it, which is why it is a label
+  where priority is a field: it is working state the repository's own issue list filters by, not a
+  fact that must travel with the issue. The difficulty ladder is: hard — a frontier agent:
+  architecture or identity refactors, money-path and reconciliation semantics, concurrency or
+  lifecycle decisions, research-heavy evidence work, wide cross-crate changes. medium — a strong
+  coding agent: real engineering on a bounded surface the issue itself already specifies. easy — a
+  basic coding agent: mechanical, well-scoped work with a clear acceptance check; operator-only
+  trackers (live verification, armed probes, decisions awaiting the operator under PROC-DECIDE) are
+  easy because no agent performs them at all. Difficulty is judged from the issue's own scope at
+  creation and re-set whenever understanding changes. A documentation label sits beside the kind
+  label when the work is docs, and any other repository label is welcome; none of those is
+  required. An issue missing one of the four is a finding on the next PR that touches it, and in
+  the tracker it is a gap the operator is asked to fill rather than a state to leave standing.
 
 ## Rust API standards
 
