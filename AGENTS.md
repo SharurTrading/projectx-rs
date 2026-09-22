@@ -136,6 +136,20 @@ domain translation.
   issue, where the ladder lives. A PR closing no issue sets its own priority by that same ladder,
   and says in its description why it closes none. The value is never restated as prose in the
   description: one field, one home, and a copy could only be free to disagree with it.
+- **PROC-REVIEW:** All work lands via PR into main. The operator manually starts the configured
+  review agent for every PR; its findings cite rule IDs from this file. Every review conversation —
+  inline, including outdated threads, and recommendations outside the diff in review-summary
+  comments — receives an explicit disposition and is resolved before merge, whether relevant or
+  adopted or not: relevant adopted findings are fixed, while irrelevant or declined findings are
+  resolved with the recorded reason and require no unnecessary code. Human (operator) review is
+  required on: anything in `crates/domain/` or `crates/application/`, order/RMS/ledger logic, and
+  any new dependency. One FEATURE per PR (operator ruling 2026-09-02): a PR is split only when its
+  verification needs separate diffs — a pure-move proof, a red-first pin that must land before the
+  change it guards — or when parallel lanes need disjoint files; never by step count or description
+  length. A plan's steps are the implementer's checklist, not PR boundaries. A plan whose groups
+  only make sense together lands as ONE PR when the operator rules so (2026-09-05: the
+  keyed-connection-set and provider-definition plan); the split criteria above govern everything
+  else.
 
 ## Rust API standards
 
