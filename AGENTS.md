@@ -46,14 +46,15 @@ domain translation.
   `/api/Account/search`.
 - **PX-RUNTIME-01:** The caller owns the async runtime. The library must not create a hidden Tokio
   runtime or block an async executor.
-- **PX-TRANSPORT-01:** HTTP responses have a configurable size bound. Real-time control and
-  signalling queues are caller-configurable with explicit overflow behavior, never quotas on active
-  subscriptions. Do not invent provider payload ceilings or estimated-memory charges. Coalesced
-  records yield to a ready consumer so a batch does not manufacture overflow by monopolizing its
-  executor. A websocket is not ready until the SignalR handshake is validated. Real-time
+- **PX-TRANSPORT-01:** HTTP responses have a configurable size bound. Outbound real-time control
+  admission is caller-configurable with explicit refusal before send, never a quota on active
+  subscriptions. Every accepted inbound event is retained in source order without a queue capacity;
+  queue depth and oldest-event age expose consumer lag. Do not invent provider payload ceilings or
+  estimated-memory charges. Coalesced records yield to a ready consumer rather than monopolizing
+  its executor. A websocket is not ready until the SignalR handshake is validated. Real-time
   lifecycle transitions are generation-fenced and single-writer. Invocation cancellation/timeout
-  reclaims only its pending slot, never the socket. Malformed application records and event overflow
-  produce nonterminal gaps; ordinary silence never triggers teardown. Actual socket failure and
+  reclaims only its pending slot, never the socket. Malformed application records produce nonterminal
+  gaps; local backlog never does. Ordinary silence never triggers teardown. Actual socket failure and
   remote close permit transport recovery while Connect remains requested. Generation-ended evidence
   follows both socket-task joins. Explicit disconnect and dropping the final client owner cancel
   owned work; operational session handles have no lifecycle authority.

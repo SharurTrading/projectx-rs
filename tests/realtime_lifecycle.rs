@@ -1291,7 +1291,6 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
         }
     });
     let client = fixture_builder(&http, address)
-        .realtime_event_capacity(512)
         .build()
         .unwrap_or_else(|e| panic!("client: {e}"));
     authenticate_fixture(&client).await;
@@ -1309,7 +1308,7 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
         .session()
         .unwrap_or_else(|e| panic!("session: {e}"));
     assert_eq!(session.generation(), first.generation);
-    // Completion must pass even though earlier data saturated or broke delivery.
+    // Completion must pass even though a malformed record fenced data delivery.
     assert!(session.invoke("Trigger", Vec::new()).await.is_ok());
     for _ in 0..expected_prefix {
         let message = events
@@ -1349,7 +1348,7 @@ async fn malformed_record_keeps_socket_and_processes_later_completion_in_batch()
 }
 
 #[tokio::test]
-async fn saturated_events_keep_socket_and_process_completions_until_gap_ack() {
+async fn malformed_record_after_a_backlog_keeps_completions_until_gap_ack() {
     use std::fmt::Write as _;
     let mut records = String::new();
     for sequence in 0..513 {
@@ -1361,7 +1360,8 @@ async fn saturated_events_keep_socket_and_process_completions_until_gap_ack() {
         )
         .unwrap_or_else(|e| panic!("fixture format: {e}"));
     }
-    exercise_nonterminal_gap(records, 512).await;
+    write!(records, "{{broken}}{TERMINATOR}").unwrap_or_else(|e| panic!("fixture format: {e}"));
+    exercise_nonterminal_gap(records, 513).await;
 }
 
 #[tokio::test]
@@ -1563,25 +1563,13 @@ async fn default_transport_preserves_twenty_thousand_event_burst_on_one_socket()
 }
 
 #[tokio::test]
-async fn small_queue_drains_a_large_single_frame_with_a_running_consumer() {
+async fn running_consumer_drains_a_large_single_frame() {
     exercise_large_burst(true).await;
 }
 
 async fn exercise_large_burst(consume_immediately: bool) {
     use std::fmt::Write as _;
-    let (http, mut client, listener) = load_fixture().await;
-    if consume_immediately {
-        client = fixture_builder(
-            &http,
-            listener
-                .local_addr()
-                .unwrap_or_else(|e| panic!("address: {e}")),
-        )
-        .realtime_event_capacity(64)
-        .build()
-        .unwrap_or_else(|e| panic!("client: {e}"));
-        authenticate_fixture(&client).await;
-    }
+    let (_http, client, listener) = load_fixture().await;
     let server = tokio::spawn(async move {
         let (mut socket, _) = accept_socket(&listener).await;
         complete_handshake(&mut socket).await;
@@ -1755,7 +1743,6 @@ fn invalid_realtime_queue_and_deadline_settings_fail_before_runtime_construction
         )
     }
     for capacity in [0, usize::MAX] {
-        assert!(builder().realtime_event_capacity(capacity).build().is_err());
         assert!(
             builder()
                 .realtime_writer_capacity(capacity)

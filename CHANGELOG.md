@@ -10,6 +10,14 @@ first public release.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Remove `ClientBuilder::realtime_event_capacity` and `RealtimeError::EventQueueFull` under
+  [#45](https://github.com/SharurTrading/projectx-rs/issues/45). Accepted real-time events now
+  remain in source order through local consumer backlog without a capacity-created `TransportGap`.
+  `RealtimeEventReceiver` exposes queued-event count and oldest-event age. Genuine malformed-data
+  gaps retain their recovery fence; outbound control admission remains bounded.
+
 ### Changed
 
 - Update the `jiff` lockfile resolution from 0.2.35 to 0.2.37 through
