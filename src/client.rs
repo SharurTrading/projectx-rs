@@ -1212,17 +1212,6 @@ impl ClientBuilder {
         self
     }
 
-    /// Sets queued real-time events per hub (default 65,536).
-    ///
-    /// This is a stalled-consumer signal, not a subscription quota. Saturation
-    /// retains a nonterminal gap; the socket and invocation completions continue.
-    /// Increase it for larger bursts or a slower consumer. Build rejects zero or
-    /// values outside Tokio's representable permit range; there is no SDK ceiling.
-    pub fn realtime_event_capacity(mut self, capacity: usize) -> Self {
-        self.realtime_config.event_capacity = capacity;
-        self
-    }
-
     /// Sets queued outbound real-time messages per hub (default 4,096).
     /// A full queue refuses new admission with `SendQueueFull` without sending.
     /// Build rejects zero or values outside Tokio's representable permit range.

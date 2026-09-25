@@ -45,6 +45,7 @@ const SIGNALR_PING: &str = "{\"type\":6}\u{001e}";
 const WEBSOCKET_READ_BUFFER_SIZE: usize = 64 * 1_024;
 const WEBSOCKET_WRITE_BUFFER_SIZE: usize = 64 * 1_024;
 const EVENT_BASE_WEIGHT: usize = 256;
+const COALESCED_RECORD_QUANTUM: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -325,7 +326,7 @@ pub enum RealtimeEvent {
     /// Callers must replay their canonical subscription set after receiving
     /// this event.
     Reconnected,
-    /// At least one provider frame could not enter the bounded event queue.
+    /// A malformed provider record or lost transport continuity created a gap.
     ///
     /// Callers must fence recovery and then call
     /// [`RealtimeEventReceiver::acknowledge_transport_gap`].
@@ -400,9 +401,6 @@ pub enum RealtimeError {
     /// The writer task or channel closed.
     #[error("real-time writer is closed")]
     SendClosed,
-    /// The bounded event queue is full and a transport gap was latched.
-    #[error("real-time event queue is full; transport gap latched")]
-    EventQueueFull,
     /// Reconnection is fenced until the caller acknowledges a transport gap.
     #[error("real-time reconnect is fenced by an unacknowledged transport gap")]
     TransportGapPending,
@@ -466,7 +464,7 @@ struct RealtimeInner {
     socket_probe: ParkingMutex<Option<(u64, u64)>>,
     request_counter: AtomicU64,
     pending: PendingInvocations,
-    event_tx: mpsc::Sender<EventEnvelope>,
+    event_tx: mpsc::UnboundedSender<EventEnvelope>,
     event_rx: ParkingMutex<Option<RealtimeEventReceiver>>,
     event_flow: Arc<EventFlow>,
 }
@@ -576,7 +574,7 @@ impl RealtimeClient {
         token: Arc<TokenStore>,
         config: RealtimeConfig,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let event_flow = EventFlow::new();
         Self {
             inner: Arc::new(RealtimeInner {
@@ -1037,7 +1035,7 @@ impl RealtimeInner {
         self.lifecycle_changed.notify_waiters();
         match published {
             Ok(PublishOutcome::Published) => Ok(()),
-            Ok(PublishOutcome::StaleGeneration) => {
+            Ok(PublishOutcome::StaleGeneration | PublishOutcome::GapFenced) => {
                 self.end_generation(generation);
                 Err(RealtimeError::ConnectionCancelled)
             }
@@ -1368,12 +1366,10 @@ impl RealtimeInner {
         text: &str,
     ) -> Result<ProcessOutcome, RealtimeError> {
         let mut records = text.split(SIGNALR_TERMINATOR).enumerate().peekable();
-        // A coalesced frame must not monopolize a current-thread executor and
-        // manufacture overflow while its consumer is ready. This is a scheduling
-        // quantum, not a record limit; even small configured queues get a turn.
-        let quantum = self.config.event_capacity.min(32);
+        // A coalesced frame must not monopolize a current-thread executor.
+        // This is a scheduling quantum, not a record or queue limit.
         while let Some((index, frame)) = records.next() {
-            if index != 0 && index % quantum == 0 {
+            if index != 0 && index % COALESCED_RECORD_QUANTUM == 0 {
                 tokio::task::yield_now().await;
             }
             if records.peek().is_none() {
@@ -1385,11 +1381,7 @@ impl RealtimeInner {
             match self.process_record(generation, frame) {
                 Ok(ProcessOutcome::Continue) => {}
                 Ok(ProcessOutcome::Close) => return Ok(ProcessOutcome::Close),
-                Err(
-                    RealtimeError::Decode(_)
-                    | RealtimeError::Protocol(_)
-                    | RealtimeError::EventQueueFull,
-                ) => {
+                Err(RealtimeError::Decode(_) | RealtimeError::Protocol(_)) => {
                     self.event_flow.mark_gap(generation);
                 }
                 Err(error) => return Err(error),
@@ -2293,7 +2285,23 @@ mod tests {
         let mut events = realtime
             .take_event_receiver()
             .unwrap_or_else(|| panic!("receiver"));
+        for sequence in 0..3 {
+            assert!(matches!(
+                realtime.inner.publish(
+                    1,
+                    RealtimeEvent::Message(json!({"sequence": sequence})),
+                    EVENT_BASE_WEIGHT,
+                ),
+                Ok(PublishOutcome::Published)
+            ));
+        }
         realtime.inner.end_generation(1);
+        for sequence in 0..3 {
+            assert_eq!(
+                events.recv().await,
+                Some(RealtimeEvent::Message(json!({"sequence": sequence})))
+            );
+        }
         assert!(
             tokio::time::timeout(Duration::from_millis(10), events.recv_message())
                 .await
@@ -2313,7 +2321,7 @@ mod tests {
     #[tokio::test]
     async fn gap_follows_accepted_events_without_waiting_for_generation_end() {
         let flow = EventFlow::new();
-        let (events_tx, events_rx) = mpsc::channel(2);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut receiver = RealtimeEventReceiver {
             events: events_rx,
             flow: Arc::clone(&flow),
@@ -2380,7 +2388,7 @@ mod tests {
     #[tokio::test]
     async fn stale_generation_cannot_publish_or_latch_a_gap_after_replacement() {
         let flow = EventFlow::new();
-        let (events_tx, events_rx) = mpsc::channel(8);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut receiver = RealtimeEventReceiver {
             events: events_rx,
             flow: Arc::clone(&flow),
@@ -2445,6 +2453,139 @@ mod tests {
             Some(RealtimeEvent::Message(json!({"generation": 2})))
         );
         assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn stalled_receiver_retains_more_than_the_former_event_limit_across_generations() {
+        const BURST: usize = 65_537;
+        let flow = EventFlow::new();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut receiver = RealtimeEventReceiver {
+            events: events_rx,
+            flow: Arc::clone(&flow),
+            gap_reported: false,
+        };
+        flow.start_generation(1)
+            .unwrap_or_else(|error| panic!("first generation must start: {error}"));
+        for sequence in 0..BURST {
+            let kind = if sequence % 2 == 0 { "market" } else { "order" };
+            assert!(matches!(
+                flow.publish(
+                    &events_tx,
+                    1,
+                    RealtimeEvent::Message(json!({"kind": kind, "sequence": sequence})),
+                    EVENT_BASE_WEIGHT,
+                ),
+                Ok(PublishOutcome::Published)
+            ));
+        }
+        assert_eq!(receiver.queued_event_count(), BURST);
+        assert!(receiver.oldest_event_age().is_some());
+        assert!(!flow.has_unacknowledged_gap());
+
+        assert!(matches!(
+            flow.publish(&events_tx, 1, RealtimeEvent::Disconnected, 0),
+            Ok(PublishOutcome::Published)
+        ));
+        flow.finish_generation(1);
+        flow.start_generation(2)
+            .unwrap_or_else(|error| panic!("replacement generation must start: {error}"));
+        assert!(matches!(
+            flow.publish(&events_tx, 2, RealtimeEvent::Reconnected, 0),
+            Ok(PublishOutcome::Published)
+        ));
+        flow.finish_generation(2);
+        drop(events_tx);
+
+        for sequence in 0..BURST {
+            let message = receiver
+                .recv_message()
+                .await
+                .unwrap_or_else(|| panic!("event {sequence} must survive"));
+            assert_eq!(message.generation, RealtimeGeneration(1));
+            let RealtimeEvent::Message(value) = message.event else {
+                panic!("data event {sequence} must survive");
+            };
+            assert_eq!(value["sequence"], sequence);
+            assert_eq!(
+                value["kind"],
+                if sequence % 2 == 0 { "market" } else { "order" }
+            );
+        }
+        assert_eq!(
+            receiver.recv_message().await,
+            Some(RealtimeMessage {
+                generation: RealtimeGeneration(1),
+                event: RealtimeEvent::Disconnected,
+            })
+        );
+        assert_eq!(
+            receiver.recv_message().await,
+            Some(RealtimeMessage {
+                generation: RealtimeGeneration(2),
+                event: RealtimeEvent::Reconnected,
+            })
+        );
+        assert_eq!(receiver.queued_event_count(), 0);
+        assert_eq!(receiver.oldest_event_age(), None);
+        assert_eq!(receiver.recv_message().await, None);
+    }
+
+    #[tokio::test]
+    async fn outbound_saturation_does_not_discard_inbound_events() {
+        let (writer, _writer_rx) = mpsc::channel(1);
+        assert!(send_queued(&writer, Message::Ping(Vec::new().into())).is_ok());
+        assert!(matches!(
+            send_queued(&writer, Message::Ping(Vec::new().into())),
+            Err(RealtimeError::SendQueueFull)
+        ));
+
+        let flow = EventFlow::new();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut receiver = RealtimeEventReceiver {
+            events: events_rx,
+            flow: Arc::clone(&flow),
+            gap_reported: false,
+        };
+        flow.start_generation(1)
+            .unwrap_or_else(|error| panic!("generation must start: {error}"));
+        assert!(matches!(
+            flow.publish(
+                &events_tx,
+                1,
+                RealtimeEvent::Message(json!({"order": "terminal"})),
+                EVENT_BASE_WEIGHT,
+            ),
+            Ok(PublishOutcome::Published)
+        ));
+        assert_eq!(
+            receiver.recv().await,
+            Some(RealtimeEvent::Message(json!({"order": "terminal"})))
+        );
+        assert!(!flow.has_unacknowledged_gap());
+    }
+
+    #[test]
+    fn dropping_event_receiver_refuses_new_data() {
+        let flow = EventFlow::new();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let receiver = RealtimeEventReceiver {
+            events: events_rx,
+            flow: Arc::clone(&flow),
+            gap_reported: false,
+        };
+        flow.start_generation(1)
+            .unwrap_or_else(|error| panic!("generation must start: {error}"));
+        assert!(matches!(
+            flow.publish(&events_tx, 1, RealtimeEvent::Connected, 0),
+            Ok(PublishOutcome::Published)
+        ));
+        assert_eq!(receiver.queued_event_count(), 1);
+        drop(receiver);
+        assert!(matches!(
+            flow.publish(&events_tx, 1, RealtimeEvent::Disconnected, 0),
+            Err(RealtimeError::EventReceiverClosed)
+        ));
     }
 
     #[tokio::test]

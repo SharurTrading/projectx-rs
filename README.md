@@ -267,8 +267,8 @@ for 15 seconds ends that failed socket. Ordinary application-data silence has no
 
 ### Transport gaps and `acknowledge_transport_gap`
 
-Real-time data delivery is bounded. Queue saturation and malformed SignalR records
-latch one nonterminal `TransportGap`. The accepted prefix is delivered first; the gap then reaches
+Real-time event delivery retains every accepted event without a fixed queue limit. Malformed SignalR
+records latch one nonterminal `TransportGap`. The accepted prefix is delivered first; the gap then reaches
 the consumer without waiting for disconnection. Later application data is discarded with that
 explicit signal until the consumer installs its recovery boundary and calls
 `acknowledge_transport_gap()`. Valid invocation completions and keepalives continue throughout.
@@ -279,6 +279,19 @@ If the socket actually ends during the gap, its lifecycle boundary is retained s
 data queue and attributed to the old generation; a replacement cannot overtake that retained tail.
 An affected application projection must reconcile or obtain a fresh snapshot before claiming
 continuity. A continuity gap alone does not prove physical subscriptions ended.
+`RealtimeEventReceiver::queued_event_count()` and `oldest_event_age()` expose local consumer lag;
+backlog age alone never creates a gap. The provider's SignalR messages do not establish a complete
+source sequence, so a consumer still needs its own replay or snapshot policy when continuity cannot
+be proved.
+
+### Migrating from 4.x
+
+Version 5 removes `ClientBuilder::realtime_event_capacity` and
+`RealtimeError::EventQueueFull`. Inbound events now remain queued until read or until the receiver
+is dropped. Monitor `queued_event_count()` and `oldest_event_age()` for a slow consumer; a late
+event is still delivered with its original generation. Keep using `TransportGap` recovery for
+malformed records and actual transport loss. Outbound writer and pending-invocation admission remain
+bounded and may refuse before a request is sent.
 
 ### Migrating from 2.x
 
@@ -373,32 +386,35 @@ The client makes overload and ambiguous execution visible instead of hiding it:
 | Order and position mutations | Never retried automatically because a timeout can have an ambiguous outcome. |
 | SignalR outbound queue | Bounded; a full queue returns `SendQueueFull` rather than growing without limit. |
 | Pending SignalR invocations | Bounded and completion-correlated; timeout or disconnect fails the caller. |
-| SignalR event queue | Bounded; overflow produces the fenced `TransportGap` lifecycle described above. |
+| SignalR event queue | Unbounded accepted-event retention; depth and oldest-event age expose lag without discarding data. |
 | Handshake and shutdown | Readiness requires a valid SignalR handshake; close and completion waits are bounded. |
 
 Cancellation cannot make a submitted mutation safe to repeat. If an application drops a mutation
 future after polling has begun, it must treat the outcome as potentially ambiguous and reconcile
 provider state before retrying, just as it would after `Error::AmbiguousMutation`.
 
-Real-time queue sizes are configurable per hub through `ClientBuilder`:
+Outbound real-time control capacities are configurable per hub through `ClientBuilder`:
 
 | Setting | Default | Meaning at saturation |
 | --- | --- | --- |
-| `realtime_event_capacity` | 65,536 events | Retain a nonterminal gap after the accepted prefix; keep the socket running. |
 | `realtime_writer_capacity` | 4,096 messages | Refuse the new invocation with `SendQueueFull` before sending it. |
 | `realtime_pending_invocation_capacity` | 4,096 invocations | Refuse new admission with `PendingInvocationCapacity` until a pending call settles. |
 | `realtime_invocation_timeout` | 15 seconds | End only the caller's wait, retaining an unknown outcome after admission. |
 
-These are burst buffers and bounds on outstanding control work, not limits on active subscriptions.
-Completed subscriptions occupy no pending slots. Choose capacities for the expected burst size and
-consumer delay; the SDK imposes no maximum below Tokio's representable permit range. The defaults
-pass synthetic fixtures with 1,024 concurrent subscriptions and a 20,000-event, multi-megabyte burst
-while the consumer is paused. Coalesced records yield during decoding so a running consumer can
-also drain a batch larger than its queue, including on a current-thread runtime.
+These are bounds on outstanding outbound control work, not limits on active subscriptions.
+Completed subscriptions occupy no pending slots. Choose outbound capacities for the provider's
+service budget and invocation deadline. ProjectX's published [rate table](https://gateway.docs.projectx.com/docs/getting-started/rate-limits/)
+specifies REST endpoints; its [real-time guide](https://gateway.docs.projectx.com/docs/realtime/)
+does not give a SignalR invocation rate. The 4,096 defaults are local headroom for the tested
+subscription burst, not a claimed provider allowance or a promise that every call completes within
+15 seconds. A full control slot refuses before send; a call admitted and then timed out retains an
+unknown outcome. The inbound queue has no configured capacity; synthetic
+fixtures retain more than 65,536 events while the consumer is paused. Coalesced records yield
+during decoding so a running consumer can drain a large batch on a current-thread runtime.
 
 There is no estimated decoded-memory budget and no arbitrary WebSocket frame, message or outbound
-invocation byte ceiling. Payloads consume their actual memory; queue saturation still reports a
-continuity gap. Read/write buffers use 64 KiB chunks, and the single writer flushes each dequeued
+invocation byte ceiling. Payloads consume their actual memory; a local event backlog is reported
+through receiver lag metrics, never as lost continuity. Read/write buffers use 64 KiB chunks, and the single writer flushes each dequeued
 message. Retained gap and lifecycle notifications remain independent of the data queue.
 
 Connection, handshake and close waits are 10, 10 and 5 seconds. Invocation waits include writer-queue
