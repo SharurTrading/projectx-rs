@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=4.0.0)](https://crates.io/crates/projectx-client/4.0.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/4.0.0?v=4.0.0)](https://docs.rs/projectx-client/4.0.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=5.0.0)](https://crates.io/crates/projectx-client/5.0.0)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/5.0.0?v=5.0.0)](https://docs.rs/projectx-client/5.0.0/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -23,7 +23,7 @@ This README documents the additional safety and lifecycle behavior supplied by t
 
 The minimum supported Rust version is 1.95.0.
 
-Version 4 follows Semantic Versioning. Public API changes that require downstream source changes
+Version 5 follows Semantic Versioning. Public API changes that require downstream source changes
 will be released under a new major version; additive APIs and fixes use minor and patch releases.
 Provider contract changes can still require callers to update operational behavior, so review the
 changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
@@ -31,14 +31,14 @@ changelog before upgrading and keep recovery around ambiguous money-moving outco
 ## Installation
 
 ```sh
-cargo add projectx-client@4
+cargo add projectx-client@5
 ```
 
 Or add the current major release directly:
 
 ```toml
 [dependencies]
-projectx-client = "4"
+projectx-client = "5"
 ```
 
 The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
