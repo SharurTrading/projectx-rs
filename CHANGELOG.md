@@ -10,6 +10,14 @@ first public release.
 
 ## [Unreleased]
 
+### Added
+
+- Add `RealtimeEventReceiver::recv_delivery()` and `RealtimeDelivery` under
+  [#49](https://github.com/SharurTrading/projectx-rs/issues/49). Each queued
+  message reports its own monotonic client queue age; synthetic continuity
+  boundaries report that no queue age exists. The consumer remains responsible
+  for action freshness and any delay after client delivery.
+
 ## [5.0.0] - 2026-09-25
 
 ### Breaking changes

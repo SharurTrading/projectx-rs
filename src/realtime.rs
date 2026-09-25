@@ -345,7 +345,9 @@ mod event_flow;
 pub(crate) use config::RealtimeConfig;
 mod session_handle;
 use event_flow::{EventEnvelope, EventFlow, PublishOutcome};
-pub use event_flow::{RealtimeEventReceiver, RealtimeGeneration, RealtimeMessage};
+pub use event_flow::{
+    RealtimeDelivery, RealtimeEventReceiver, RealtimeGeneration, RealtimeMessage,
+};
 pub use session_handle::RealtimeSession;
 
 /// Errors returned by the real-time transport.

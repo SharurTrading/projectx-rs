@@ -56,8 +56,8 @@ pub use models::{
 };
 pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
 pub use realtime::{
-    Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, RealtimeGeneration,
-    RealtimeMessage, RealtimeSession, SignalRInvocation,
+    Hub, RealtimeClient, RealtimeDelivery, RealtimeError, RealtimeEvent, RealtimeEventReceiver,
+    RealtimeGeneration, RealtimeMessage, RealtimeSession, SignalRInvocation,
 };
 pub use rust_decimal::Decimal;
 pub use timestamp::{ProviderDate, ProviderDateError, Timestamp, TimestampError};

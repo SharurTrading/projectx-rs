@@ -49,7 +49,8 @@ domain translation.
 - **PX-TRANSPORT-01:** HTTP responses have a configurable size bound. Outbound real-time control
   admission is caller-configurable with explicit refusal before send, never a quota on active
   subscriptions. Every accepted inbound event is retained in source order without a queue capacity;
-  queue depth and oldest-event age expose consumer lag. Do not invent provider payload ceilings or
+  queue depth, oldest-event age, and each delivered message's own monotonic client queue age expose
+  consumer lag without making the client an action-freshness authority. Do not invent provider payload ceilings or
   estimated-memory charges. Coalesced records yield to a ready consumer rather than monopolizing
   its executor. A websocket is not ready until the SignalR handshake is validated. Real-time
   lifecycle transitions are generation-fenced and single-writer. Invocation cancellation/timeout

@@ -253,6 +253,11 @@ before enqueueing if it has been replaced. A session handle has no disconnect au
 keep the client owner alive. Use `RealtimeEventReceiver::recv_message()` to receive each event with
 its `RealtimeGeneration`; `Disconnected` proves both of that generation's socket tasks have stopped.
 Late work cannot publish to, settle requests on, or close a replacement generation.
+Use `recv_delivery()` when the application needs the exact message's monotonic client queue age.
+The returned `RealtimeDelivery::client_queue_age` covers only time between client acceptance and
+delivery to the caller; synthetic continuity boundaries have `None`. The application retains all
+events in order and judges price-action freshness using this age, its own subsequent handoff delay,
+and venue timestamps.
 
 Invocation timeout or cancellation after queue admission remains ambiguous: the provider may have
 applied the operation. Only that invocation's pending slot is reclaimed; the socket remains open.

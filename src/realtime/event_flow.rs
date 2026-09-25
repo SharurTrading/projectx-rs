@@ -24,6 +24,21 @@ pub struct RealtimeMessage {
     pub event: RealtimeEvent,
 }
 
+/// One received message and its client-side queue delay.
+///
+/// The age is measured with a monotonic clock from acceptance into the
+/// realtime receiver until delivery to this caller. It excludes time spent
+/// in a consuming application's own queues. Synthetic continuity and
+/// lifecycle boundaries retained outside the event queue have no such age.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct RealtimeDelivery {
+    /// Socket-scoped observation or lifecycle boundary.
+    pub message: RealtimeMessage,
+    /// Time this exact message waited in the client's accepted event queue.
+    pub client_queue_age: Option<Duration>,
+}
+
 pub(super) struct EventFlow {
     pub(super) state: ParkingMutex<EventFlowState>,
     pub(super) queued_weight: AtomicUsize,
@@ -65,6 +80,7 @@ impl Drop for EventReservation {
 
 pub(super) struct EventEnvelope {
     message: RealtimeMessage,
+    accepted_at: Instant,
     reservation: EventReservation,
 }
 
@@ -76,13 +92,17 @@ pub(super) enum PublishOutcome {
 }
 
 impl EventEnvelope {
-    fn into_message(self) -> RealtimeMessage {
+    fn into_delivery(self) -> RealtimeDelivery {
         let Self {
             message,
+            accepted_at,
             reservation,
         } = self;
         drop(reservation);
-        message
+        RealtimeDelivery {
+            message,
+            client_queue_age: Some(accepted_at.elapsed()),
+        }
     }
 }
 
@@ -127,11 +147,13 @@ impl EventFlow {
             return Ok(self.retain_gap_boundary(&mut state, generation, event));
         }
         self.queued_weight.fetch_add(weight, Ordering::AcqRel);
+        let accepted_at = Instant::now();
         let envelope = EventEnvelope {
             message: RealtimeMessage {
                 generation: RealtimeGeneration(generation),
                 event,
             },
+            accepted_at,
             reservation: EventReservation {
                 flow: Arc::clone(self),
                 weight,
@@ -139,7 +161,7 @@ impl EventFlow {
         };
         match events.send(envelope) {
             Ok(()) => {
-                state.queued_at.push_back(Instant::now());
+                state.queued_at.push_back(accepted_at);
                 Ok(PublishOutcome::Published)
             }
             Err(_) => Err(RealtimeError::EventReceiverClosed),
@@ -258,7 +280,18 @@ impl RealtimeEventReceiver {
 
     /// Receives the accepted prefix, then retained gap and lifecycle boundaries.
     /// A disconnected boundary proves both socket tasks have stopped.
+    /// Use [`Self::recv_delivery`] when this message's queue age matters.
     pub async fn recv_message(&mut self) -> Option<RealtimeMessage> {
+        self.recv_delivery().await.map(|delivery| delivery.message)
+    }
+
+    /// Receives the accepted prefix with per-message client queue delay.
+    ///
+    /// The duration is evidence about this message only; consumers must add
+    /// their own handoff delay and decide whether a price may authorize an
+    /// action. A `None` age belongs to a synthetic boundary, not to a fresh
+    /// data message. Delivery never drops an old event.
+    pub async fn recv_delivery(&mut self) -> Option<RealtimeDelivery> {
         loop {
             let changed = self.flow.changed.notified();
             tokio::pin!(changed);
@@ -267,7 +300,7 @@ impl RealtimeEventReceiver {
                 let mut state = self.flow.state.lock();
                 if let Ok(envelope) = self.events.try_recv() {
                     state.queued_at.pop_front();
-                    return Some(envelope.into_message());
+                    return Some(envelope.into_delivery());
                 }
                 if let Some(fence) = state.gap.as_mut() {
                     let event = if let Some(event) = fence.start_event.take() {
@@ -286,7 +319,10 @@ impl RealtimeEventReceiver {
                             event,
                         };
                         self.flow.release_acknowledged(&mut state);
-                        return Some(message);
+                        return Some(RealtimeDelivery {
+                            message,
+                            client_queue_age: None,
+                        });
                     }
                 }
                 if self.events.is_closed() {
@@ -298,7 +334,7 @@ impl RealtimeEventReceiver {
                 envelope = self.events.recv() => {
                     if let Some(envelope) = envelope {
                         self.flow.state.lock().queued_at.pop_front();
-                        return Some(envelope.into_message());
+                        return Some(envelope.into_delivery());
                     }
                 }
                 () = &mut changed => {}
@@ -337,5 +373,90 @@ impl fmt::Debug for RealtimeEventReceiver {
             )
             .field("gap_reported", &self.gap_reported)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_age_belongs_to_its_exact_envelope() {
+        let flow = EventFlow::new();
+        let old = EventEnvelope {
+            message: RealtimeMessage {
+                generation: RealtimeGeneration(1),
+                event: RealtimeEvent::Connected,
+            },
+            accepted_at: Instant::now() - Duration::from_secs(3),
+            reservation: EventReservation {
+                flow: Arc::clone(&flow),
+                weight: 0,
+            },
+        };
+        let old = old.into_delivery();
+        let fresh = EventEnvelope {
+            message: RealtimeMessage {
+                generation: RealtimeGeneration(1),
+                event: RealtimeEvent::Disconnected,
+            },
+            accepted_at: Instant::now(),
+            reservation: EventReservation {
+                flow: Arc::clone(&flow),
+                weight: 0,
+            },
+        }
+        .into_delivery();
+        assert!(
+            old.client_queue_age
+                .is_some_and(|age| age >= Duration::from_secs(3))
+        );
+        assert!(old.client_queue_age > fresh.client_queue_age);
+        assert_eq!(old.message.generation, RealtimeGeneration(1));
+    }
+
+    #[tokio::test]
+    async fn queued_messages_have_individual_ages_and_synthetic_gap_has_none() {
+        let flow = EventFlow::new();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let mut receiver = RealtimeEventReceiver {
+            events: events_rx,
+            flow: Arc::clone(&flow),
+            gap_reported: false,
+        };
+        assert!(flow.start_generation(1).is_ok());
+        assert!(matches!(
+            flow.publish(&events_tx, 1, RealtimeEvent::Connected, 0),
+            Ok(PublishOutcome::Published)
+        ));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(matches!(
+            flow.publish(&events_tx, 1, RealtimeEvent::Disconnected, 0),
+            Ok(PublishOutcome::Published)
+        ));
+        let first = receiver
+            .recv_delivery()
+            .await
+            .unwrap_or_else(|| panic!("first accepted event"));
+        let second = receiver
+            .recv_delivery()
+            .await
+            .unwrap_or_else(|| panic!("second accepted event"));
+        assert_eq!(first.message.event, RealtimeEvent::Connected);
+        assert_eq!(second.message.event, RealtimeEvent::Disconnected);
+        assert!(
+            first
+                .client_queue_age
+                .is_some_and(|age| age >= Duration::from_millis(10))
+        );
+        assert!(second.client_queue_age.is_some());
+
+        flow.mark_gap(1);
+        let gap = receiver
+            .recv_delivery()
+            .await
+            .unwrap_or_else(|| panic!("retained gap"));
+        assert_eq!(gap.message.event, RealtimeEvent::TransportGap);
+        assert_eq!(gap.client_queue_age, None);
     }
 }
