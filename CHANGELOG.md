@@ -10,6 +10,16 @@ first public release.
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-09-28
+
+### Fixed
+
+- Preserve exactly representable financial JSON values and reject precision or range loss under
+  [#52](https://github.com/SharurTrading/projectx-rs/issues/52). Raw and quoted decimals, including
+  scientific notation, no longer silently round. Reducible trailing zeros are handled before
+  representability checks, so exact values such as `100e-30` remain usable. Optional null and
+  omitted fields keep their existing behavior; no currency rounding policy is introduced.
+
 ## [5.0.0] - 2026-09-25
 
 ### Breaking changes
@@ -213,7 +223,8 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...HEAD
+[5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...v4.0.0
 [3.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...v3.0.1

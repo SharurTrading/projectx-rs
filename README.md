@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=5.0.0)](https://crates.io/crates/projectx-client/5.0.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/5.0.0?v=5.0.0)](https://docs.rs/projectx-client/5.0.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=5.0.1)](https://crates.io/crates/projectx-client/5.0.1)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/5.0.1?v=5.0.1)](https://docs.rs/projectx-client/5.0.1/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -433,6 +433,18 @@ boundary without enabling dependency-wide arbitrary-precision Serde behavior; ty
 emitted as `RealtimeEvent::Invocation` for exact typed decoding. The SignalR codec handles
 record-separator framing, messages coalesced with the handshake response, and provider ping/pong
 traffic.
+
+Monetary decoding accepts raw JSON numbers and quoted decimal or scientific notation only when
+their value is exactly representable by `Decimal` (a 96-bit coefficient and at most 28 decimal
+places). Reducible trailing zeros are allowed, including scientific mantissas that require
+cancellation before construction. Unsupported precision, overflow and nonzero underflow return a
+decode error rather than rounding or becoming zero. Optional monetary fields still accept `null`
+and omission. Signed zero retains its sign and a representable supplied scale; an unrepresentable
+zero scale is normalized to zero scale. Exponent processing is bounded by input length rather than
+exponent magnitude. This corrects the silent rounding reported in
+[#52](https://github.com/SharurTrading/projectx-rs/issues/52), without changing prices or balances
+to a fixed number of decimal places. `SignalRInvocation::from_value` cannot recover precision
+already lost while constructing a `serde_json::Value`; use `from_json` for raw-token typed decoding.
 
 `GatewayQuote` messages are sparse updates rather than guaranteed full snapshots. Accordingly,
 `MarketQuote` keeps the symbol and provider `last_updated` timestamp required while representing
