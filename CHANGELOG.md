@@ -10,6 +10,14 @@ first public release.
 
 ## [Unreleased]
 
+### Changed
+
+- Update the `rand` lockfile resolution from 0.10.2 to 0.10.3 and the `thiserror` lockfile
+  resolution from 2.0.20 to 2.0.21 through
+  [#56](https://github.com/SharurTrading/projectx-rs/pull/56).
+- Refresh all `taiki-e/install-action` CI pins from v2.87.14 to v2.87.20 through
+  [#55](https://github.com/SharurTrading/projectx-rs/pull/55).
+
 ## [5.0.1] - 2026-09-28
 
 ### Fixed
