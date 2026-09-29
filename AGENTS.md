@@ -120,12 +120,12 @@ domain translation.
   lifecycle decisions, research-heavy evidence work, wide cross-crate changes. medium — a strong
   coding agent: real engineering on a bounded surface the issue itself already specifies. easy — a
   basic coding agent: mechanical, well-scoped work with a clear acceptance check; operator-only
-  trackers (live verification, armed probes, decisions awaiting the operator under PROC-DECIDE) are
-  easy because no agent performs them at all. Difficulty is judged from the issue's own scope at
-  creation and re-set whenever understanding changes. A documentation label sits beside the kind
-  label when the work is docs, and any other repository label is welcome; none of those is
-  required. An issue missing one of the four is a finding on the next PR that touches it, and in
-  the tracker it is a gap the operator is asked to fill rather than a state to leave standing.
+  trackers (live verification, armed probes, decisions awaiting the operator) are easy because no
+  agent performs them at all. Difficulty is judged from the issue's own scope at creation and
+  re-set whenever understanding changes. A documentation label sits beside the kind label when
+  the work is docs, and any other repository label is welcome; none of those is required.
+  An issue missing one of the four is a finding on the next PR that touches it, and in the
+  tracker it is a gap the operator is asked to fill rather than a state to leave standing.
 - **PROC-PR-TRIAGE:** A PR carries the same classification as the issue it closes, so the tracker
   and the PR list read as one body of work: exactly one kind label (bug / enhancement / task,
   matching what the diff changes), and the same Priority issue field set to its linked issue's

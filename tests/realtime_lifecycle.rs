@@ -1160,24 +1160,20 @@ async fn idle_session_sends_client_signalr_keepalive() {
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
 }
 
-#[tokio::test]
-async fn ping_and_pong_traffic_keeps_the_session_live() {
-    let http = MockServer::start_async().await;
-    let _login = http
-        .mock_async(|when, then| {
-            when.method(POST).path("/api/Auth/loginKey");
-            then.status(200)
-                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
-        })
-        .await;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
-    let address = listener
-        .local_addr()
-        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+// Fixture server for the paused-time liveness test. It answers the client's
+// socket probes explicitly — the implicit tungstenite pong flush lands on the
+// server's next socket poll — and follows each echo with an application
+// invocation. The client's reader processes frames in order, so consuming that
+// invocation proves the reader already acknowledged the probe echo.
+fn spawn_ping_pong_server(
+    listener: TcpListener,
+) -> (
+    mpsc::Sender<()>,
+    mpsc::Receiver<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let (ping_tx, mut ping_rx) = mpsc::channel(1);
-    let (pong_tx, mut pong_rx) = mpsc::channel(1);
+    let (pong_tx, pong_rx) = mpsc::channel(1);
     let server = tokio::spawn(async move {
         let (mut socket, _) = accept_socket(&listener).await;
         complete_handshake(&mut socket).await;
@@ -1193,6 +1189,22 @@ async fn ping_and_pong_traffic_keeps_the_session_live() {
                         .unwrap_or_else(|error| panic!("ping must send: {error}"));
                 }
                 message = socket.next() => match message {
+                    Some(Ok(Message::Ping(payload))) => {
+                        socket
+                            .send(Message::Pong(payload))
+                            .await
+                            .unwrap_or_else(|error| panic!("probe echo must send: {error}"));
+                        socket
+                            .send(Message::Text(
+                                format!(
+                                    "{}{TERMINATOR}",
+                                    json!({"type":1,"target":"probe-witness","arguments":["probe"]})
+                                )
+                                .into(),
+                            ))
+                            .await
+                            .unwrap_or_else(|error| panic!("witness must send: {error}"));
+                    }
                     Some(Ok(Message::Pong(_))) => {
                         match pong_tx.try_send(()) {
                             Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
@@ -1212,17 +1224,68 @@ async fn ping_and_pong_traffic_keeps_the_session_live() {
             }
         }
     });
+    (ping_tx, pong_rx, server)
+}
+
+#[tokio::test]
+async fn ping_and_pong_traffic_keeps_the_session_live() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (ping_tx, mut pong_rx, server) = spawn_ping_pong_server(listener);
 
     let client = fixture_client(&http, address);
     authenticate_fixture(&client).await;
     let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
     realtime
         .connect()
         .await
         .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert!(matches!(
+        events.recv().await,
+        Some(RealtimeEvent::Connected)
+    ));
     tokio::time::pause();
+    // Run the socket tasks past their start handshakes while time is frozen so
+    // the writer's probe and keepalive timers are created on the paused grid.
+    // First polled any later, the writer's first deadline would land a full
+    // interval ahead of the advances and strand the pump on a fifteen-second
+    // real park with no socket traffic to wake it.
     for _ in 0..4 {
-        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+    }
+    // One advance per probe interval. The advance overshoots the boundary by
+    // 100ms so the writer's due boundary timer fires while the clock is still
+    // frozen, and this window's probe is on the wire before any park can
+    // outlast its deadline. The round trips that prove the window ran — the
+    // session ping/pong exchange and an application invocation sent after the
+    // probe echo — run with the clock resumed: tokio's paused driver jumps the
+    // clock to the next pending timer deadline whenever every task parks
+    // awaiting real loopback I/O, so holding a live probe deadline across
+    // those parks let the deadline fire before its pong arrived and tore the
+    // generation down. Resumed, the next deadline is 15 real seconds away,
+    // only real time can reach it, and the pump's own traffic always wakes the
+    // parks first. The witness still closes each window: the client's reader
+    // processes frames in order, so consuming an invocation that follows the
+    // probe echo proves the echo was acknowledged before the next mock
+    // advance.
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_millis(15_100)).await;
+        tokio::time::resume();
         ping_tx
             .send(())
             .await
@@ -1231,6 +1294,16 @@ async fn ping_and_pong_traffic_keeps_the_session_live() {
             .recv()
             .await
             .unwrap_or_else(|| panic!("pong must arrive"));
+        let witnessed = events
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("event stream must stay open"));
+        assert!(
+            matches!(&witnessed, RealtimeEvent::Invocation(invocation)
+                if invocation.target() == "probe-witness"),
+            "expected the probe witness invocation: {witnessed:?}"
+        );
+        tokio::time::pause();
     }
     assert!(realtime.is_connected());
     assert!(!server.is_finished());
@@ -1241,6 +1314,98 @@ async fn ping_and_pong_traffic_keeps_the_session_live() {
         tokio::time::timeout(Duration::from_secs(2), server).await,
         Ok(Ok(()))
     ));
+}
+
+// Deterministic reproduction of the intermittent failure in issue #53: a peer
+// that never answers the socket probe is torn down when the next probe tick
+// observes the unanswered probe. The old fixture relied on an implicit
+// wall-clock pong echo racing the mock clock, which let this teardown fire
+// spuriously under parallel load. Holding the socket open without reading
+// suppresses the protocol-level pong reply, so the probe stays unanswered.
+#[tokio::test]
+async fn unanswered_socket_probe_ends_the_generation() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "token": "synthetic-token"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture listener must have an address: {error}"));
+    let (ready, ready_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let _ = ready.send(());
+        // Hold TCP open without reading: an active WebSocket probe gets no pong.
+        let _ = release_rx.await;
+        drop(socket);
+        // The probe teardown must not invent a reconnect attempt of its own.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+
+    let client = fixture_client(&http, address);
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("event receiver must be available"));
+    realtime
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
+    assert!(matches!(
+        events.recv().await,
+        Some(RealtimeEvent::Connected)
+    ));
+    ready_rx
+        .await
+        .unwrap_or_else(|error| panic!("fixture ready must signal: {error}"));
+    tokio::time::pause();
+    // Run the socket tasks past their start handshakes while time is frozen so
+    // the writer's probe timers are created on the paused grid before any
+    // advance; polled any later, their first deadline would land a full
+    // interval ahead of the frozen instant and pin nothing.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    // Step to the probe boundary in bounded settled advances: the first due
+    // probe tick sends the probe, and the next tick observing it still
+    // unanswered — not ordinary silence — ends the generation. The peer
+    // answers nothing, so reaching that boundary needs no wall-clock
+    // scheduling.
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        if !realtime.is_connected() {
+            break;
+        }
+    }
+    // The active probe deadline, rather than ordinary silence, ends this socket.
+    assert!(matches!(
+        events.recv().await,
+        Some(RealtimeEvent::Disconnected)
+    ));
+    assert!(!realtime.is_connected());
+    assert!(realtime.disconnect().await.is_ok());
+    tokio::time::resume();
+    let _ = release.send(());
+    server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
 }
 
 async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
