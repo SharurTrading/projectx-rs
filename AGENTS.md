@@ -20,6 +20,24 @@ domain translation.
   runtime. Generic Rust ecosystem dependencies are allowed.
 - **PX-DECIMAL-01:** Prices, money, balances, fees, and P&L use `rust_decimal::Decimal` in the public
   API. Never expose floating-point values for financial fields.
+- **LAW-INVARIANT:** A supposedly impossible branch is not permission to invent
+  a business value or silently abandon work. Exhaustive matches, failed
+  conversions and missing required state must not fabricate a side, price,
+  quantity, identity, account mode or success merely to satisfy the type checker
+  or avoid a panic. Prefer a type or function boundary that makes the invalid
+  combination unrepresentable; where it remains representable, report a typed
+  invariant failure to the owning caller. A bare `return`, `continue`, `None`,
+  `Ok(())`, log-only path or `Default` is not a fix when it disguises that
+  failure as absence, success or a benign no-op. Legitimate optional values,
+  declared defaults and duplicate/stale outcomes remain valid only when they
+  express the operation's actual contract. An "unreachable by construction"
+  comment or `debug_assert!` alone does not establish a release-build outcome.
+  Review verifies the caller handles the failure explicitly, preserves accepted
+  evidence and avoids partial business-state mutation. Test a representable
+  failure at its owning boundary and assert its observable outcome and state
+  preservation, not merely that it does not panic. Existing violations found
+  outside the current change receive a tracked issue with the path and required
+  outcome.
 - **PX-SECRET-01:** Credentials and bearer tokens are never logged, included in errors, persisted,
   or exposed through public token accessors. Debug output is redacted. Remote endpoints require
   authenticated encryption; plain HTTP/WebSocket transport is permitted only for exact loopback
