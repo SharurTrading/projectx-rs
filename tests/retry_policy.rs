@@ -467,7 +467,7 @@ async fn query_retries_one_transient_server_failure() {
     let count = server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
-    assert!(accounts.is_empty());
+    assert!(accounts.is_explicitly_empty());
     assert_eq!(count, 3);
 }
 

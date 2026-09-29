@@ -956,14 +956,103 @@ impl OrderQueryBuilder {
     }
 }
 
+/// A provider list field read from a successful response body.
+///
+/// Successful responses distinguish an explicit list from a body that merely
+/// lacks the field: the provider may omit a list field or serialize it as
+/// JSON `null` while still reporting success, and an explicit empty array is
+/// authoritative evidence that the listed set is empty. Both absent shapes
+/// decode to [`ProviderList::Absent`]; every explicit array decodes to
+/// [`ProviderList::Listed`], including the empty array. Only
+/// [`ProviderList::Listed`] rows are evidence a consumer may flatten from.
+///
+/// # Examples
+///
+/// ```
+/// use projectx_client::ProviderList;
+///
+/// let listed: ProviderList<u8> = ProviderList::Listed(Vec::new());
+/// assert!(listed.is_explicitly_empty());
+/// assert_eq!(listed.into_listed(), Some(Vec::new()));
+///
+/// let absent: ProviderList<u8> = ProviderList::Absent;
+/// assert!(!absent.is_listed());
+/// assert_eq!(absent.into_listed(), None);
+/// ```
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ProviderList<T> {
+    /// The response carried the field with an explicit array, possibly empty.
+    Listed(Vec<T>),
+    /// The response omitted the field or serialized it as JSON `null`.
+    #[default]
+    Absent,
+}
+
+impl<T> ProviderList<T> {
+    /// Returns the explicit rows when the provider listed them.
+    #[must_use]
+    pub fn into_listed(self) -> Option<Vec<T>> {
+        match self {
+            Self::Listed(rows) => Some(rows),
+            Self::Absent => None,
+        }
+    }
+
+    /// Returns the explicit rows, or an empty vector when the field was absent.
+    ///
+    /// This discards the distinction between an authoritative empty list and
+    /// an absent field; prefer matching on the list when that distinction
+    /// matters.
+    #[must_use]
+    pub fn unwrap_or_empty(self) -> Vec<T> {
+        self.into_listed().unwrap_or_default()
+    }
+
+    /// Returns whether the response carried the field explicitly.
+    #[must_use]
+    pub fn is_listed(&self) -> bool {
+        matches!(self, Self::Listed(_))
+    }
+
+    /// Returns whether the response carried an authoritative empty array.
+    ///
+    /// This is true only for an explicit empty list; an absent field is not
+    /// evidence of emptiness.
+    #[must_use]
+    pub fn is_explicitly_empty(&self) -> bool {
+        matches!(self, Self::Listed(rows) if rows.is_empty())
+    }
+}
+
+impl<T> From<ProviderList<T>> for Option<Vec<T>> {
+    fn from(list: ProviderList<T>) -> Self {
+        list.into_listed()
+    }
+}
+
+impl<'de, T> Deserialize<'de> for ProviderList<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match Option::<Vec<T>>::deserialize(deserializer)? {
+            Some(rows) => Ok(Self::Listed(rows)),
+            None => Ok(Self::Absent),
+        }
+    }
+}
+
 /// One page returned by [`Client::query_orders`](crate::Client::query_orders).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[non_exhaustive]
 #[serde(rename_all = "camelCase")]
 pub struct OrderPage {
     /// Orders in provider-selected page order.
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub orders: Vec<Order>,
+    #[serde(default)]
+    pub orders: ProviderList<Order>,
     /// Total matching order count when requested and supplied by the provider.
     #[serde(default)]
     pub total_count: Option<i32>,
@@ -1989,14 +2078,14 @@ where
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AccountsBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) accounts: Vec<Account>,
+    #[serde(default)]
+    pub(crate) accounts: ProviderList<Account>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContractsBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) contracts: Vec<Contract>,
+    #[serde(default)]
+    pub(crate) contracts: ProviderList<Contract>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2006,14 +2095,14 @@ pub(crate) struct ContractBody {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct BarsBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) bars: Vec<Bar>,
+    #[serde(default)]
+    pub(crate) bars: ProviderList<Bar>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OrdersBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) orders: Vec<Order>,
+    #[serde(default)]
+    pub(crate) orders: ProviderList<Order>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2029,73 +2118,75 @@ pub(crate) struct PlaceOrderBody {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PositionsBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) positions: Vec<Position>,
+    #[serde(default)]
+    pub(crate) positions: ProviderList<Position>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct TradesBody {
-    #[serde(default, deserialize_with = "null_to_empty")]
-    pub(crate) trades: Vec<Trade>,
+    #[serde(default)]
+    pub(crate) trades: ProviderList<Trade>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EmptyBody {}
 
-pub(crate) fn null_to_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    macro_rules! assert_empty_list {
+    macro_rules! assert_absent {
         ($body:ty, $field:ident, $json:literal) => {{
             let envelope: Envelope<$body> = serde_json::from_str($json)
                 .unwrap_or_else(|error| panic!("fixture envelope must decode: {error}"));
             let Envelope::Accepted(body) = envelope else {
                 panic!("fixture envelope must be accepted");
             };
-            assert!(body.$field.is_empty());
+            assert_eq!(body.$field, ProviderList::Absent);
         }};
     }
 
     #[test]
-    fn optional_list_bodies_normalize_missing_and_null_to_empty() {
-        assert_empty_list!(
+    fn list_bodies_keep_explicit_lists_distinct_from_missing_and_null() {
+        assert_absent!(
             AccountsBody,
             accounts,
             r#"{"success":true,"errorCode":0,"accounts":null}"#
         );
-        assert_empty_list!(
+        assert_absent!(
             ContractsBody,
             contracts,
             r#"{"success":true,"errorCode":0}"#
         );
-        assert_empty_list!(
+        assert_absent!(
             OrdersBody,
             orders,
             r#"{"success":true,"errorCode":0,"orders":null}"#
         );
-        assert_empty_list!(
+        assert_absent!(
             OrderPage,
             orders,
             r#"{"success":true,"errorCode":0,"orders":null}"#
         );
-        assert_empty_list!(
+        assert_absent!(
             PositionsBody,
             positions,
             r#"{"success":true,"errorCode":0}"#
         );
-        assert_empty_list!(
+        assert_absent!(
             TradesBody,
             trades,
             r#"{"success":true,"errorCode":0,"trades":null}"#
+        );
+    }
+
+    #[test]
+    fn list_bodies_list_explicit_arrays_including_the_empty_array() {
+        assert_eq!(
+            serde_json::from_str::<PositionsBody>(r#"{"positions":[]}"#)
+                .unwrap_or_else(|error| panic!("explicit empty list must decode: {error}"))
+                .positions,
+            ProviderList::Listed(Vec::new())
         );
     }
 

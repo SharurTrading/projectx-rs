@@ -20,8 +20,8 @@ use crate::{
     Account, AccountId, ApplicationCredentials, Bar, CancelOrder, CloseContract, Contract,
     Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, OperationResponse, Order,
     OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch, PartialCloseContract, PlaceOrder,
-    Position, ProviderError, RateLimitConfig, RateLimitKind, RealtimeClient, SearchContracts,
-    Trade, TradeQuery, TradeSearch,
+    Position, ProviderError, ProviderList, RateLimitConfig, RateLimitKind, RealtimeClient,
+    SearchContracts, Trade, TradeQuery, TradeSearch,
     credentials::AuthenticationCredentials,
     error_codes::ErrorCodeTable,
     models::{
@@ -479,7 +479,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn search_active_accounts(&self) -> Result<Vec<Account>, Error> {
+    pub async fn search_active_accounts(&self) -> Result<ProviderList<Account>, Error> {
         self.search_accounts(true).await
     }
 
@@ -487,11 +487,18 @@ impl Client {
     ///
     /// Set `only_active_accounts` to `false` to include inactive accounts. Use
     /// [`Self::search_active_accounts`] when only active accounts are required.
+    /// Returns a [`ProviderList`]: an explicit array, including an
+    /// authoritative empty one, is [`ProviderList::Listed`], while a success
+    /// envelope that omits the field or serializes it as JSON `null` is
+    /// [`ProviderList::Absent`].
     ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn search_accounts(&self, only_active_accounts: bool) -> Result<Vec<Account>, Error> {
+    pub async fn search_accounts(
+        &self,
+        only_active_accounts: bool,
+    ) -> Result<ProviderList<Account>, Error> {
         let response: Envelope<AccountsBody> = self
             .post_authenticated(
                 RateLimitKind::General,
@@ -506,10 +513,13 @@ impl Client {
 
     /// Lists contracts available to the selected live or simulated data feed.
     ///
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn available_contracts(&self, live: bool) -> Result<Vec<Contract>, Error> {
+    pub async fn available_contracts(&self, live: bool) -> Result<ProviderList<Contract>, Error> {
         let response: Envelope<ContractsBody> = self
             .post_authenticated(
                 RateLimitKind::General,
@@ -523,6 +533,8 @@ impl Client {
     /// Searches contracts using provider-native search text.
     ///
     /// The provider returns at most 20 matching contracts per request.
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///
     /// # Errors
     ///
@@ -530,7 +542,7 @@ impl Client {
     pub async fn search_contracts(
         &self,
         request: &SearchContracts,
-    ) -> Result<Vec<Contract>, Error> {
+    ) -> Result<ProviderList<Contract>, Error> {
         let response: Envelope<ContractsBody> = self
             .post_authenticated(RateLimitKind::General, "api/Contract/search", request)
             .await?;
@@ -555,10 +567,16 @@ impl Client {
 
     /// Retrieves historical bars for an explicit provider contract.
     ///
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn retrieve_bars(&self, request: &HistoryRequest) -> Result<Vec<Bar>, Error> {
+    pub async fn retrieve_bars(
+        &self,
+        request: &HistoryRequest,
+    ) -> Result<ProviderList<Bar>, Error> {
         let response: Envelope<BarsBody> = self
             .post_authenticated(RateLimitKind::History, "api/History/retrieveBars", request)
             .await?;
@@ -567,10 +585,13 @@ impl Client {
 
     /// Searches historical orders for an account and time range.
     ///
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn search_orders(&self, request: &OrderSearch) -> Result<Vec<Order>, Error> {
+    pub async fn search_orders(&self, request: &OrderSearch) -> Result<ProviderList<Order>, Error> {
         let response: Envelope<OrdersBody> = self
             .post_authenticated(RateLimitKind::General, "api/Order/search", request)
             .await?;
@@ -606,11 +627,16 @@ impl Client {
     /// including inactive bracket children. Use [`Self::query_orders`] and
     /// explicitly select every non-terminal status needed by the application
     /// when building a complete working-order reconciliation view.
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn search_open_orders(&self, account_id: AccountId) -> Result<Vec<Order>, Error> {
+    pub async fn search_open_orders(
+        &self,
+        account_id: AccountId,
+    ) -> Result<ProviderList<Order>, Error> {
         let response: Envelope<OrdersBody> = self
             .post_authenticated(
                 RateLimitKind::General,
@@ -631,6 +657,8 @@ impl Client {
     /// these includes inactive bracket children omitted by [`Self::search_open_orders`].
     /// Paginated callers must continue until the returned page is exhausted;
     /// request a total count when an explicit completion check is useful.
+    /// [`OrderPage::orders`] preserves whether the provider carried the array
+    /// explicitly; see [`Self::search_accounts`] for the distinction.
     ///
     /// # Errors
     ///
@@ -707,13 +735,19 @@ impl Client {
 
     /// Searches currently open positions for an account.
     ///
+    /// Returns a [`ProviderList`]: an explicit array, including an
+    /// authoritative empty one that may establish flatness, is
+    /// [`ProviderList::Listed`], while a success envelope that omits the field
+    /// or serializes it as JSON `null` is [`ProviderList::Absent`] and is not
+    /// evidence of an empty position book.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
     pub async fn search_open_positions(
         &self,
         account_id: AccountId,
-    ) -> Result<Vec<Position>, Error> {
+    ) -> Result<ProviderList<Position>, Error> {
         let response: Envelope<PositionsBody> = self
             .post_authenticated(
                 RateLimitKind::General,
@@ -778,10 +812,13 @@ impl Client {
 
     /// Searches executions for an account and time range.
     ///
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn search_trades(&self, request: &TradeSearch) -> Result<Vec<Trade>, Error> {
+    pub async fn search_trades(&self, request: &TradeSearch) -> Result<ProviderList<Trade>, Error> {
         let response: Envelope<TradesBody> = self
             .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
             .await?;
@@ -792,11 +829,13 @@ impl Client {
     ///
     /// Unlike [`Self::search_trades`], a [`TradeQuery`] can omit either or both
     /// timestamp bounds to express the provider's complete request schema.
+    /// Returns a [`ProviderList`] preserving whether the provider carried the
+    /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
-    pub async fn query_trades(&self, request: &TradeQuery) -> Result<Vec<Trade>, Error> {
+    pub async fn query_trades(&self, request: &TradeQuery) -> Result<ProviderList<Trade>, Error> {
         let response: Envelope<TradesBody> = self
             .post_authenticated(RateLimitKind::General, "api/Trade/search", request)
             .await?;

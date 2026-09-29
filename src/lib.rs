@@ -12,17 +12,27 @@
 //! Safe queries wait asynchronously for capacity, while mutations return
 //! [`Error::LocallyRateLimited`] before sending when the local budget is full.
 //!
+//! Successful list reads return [`ProviderList`] so an explicit provider
+//! array, including an authoritative empty one, stays distinguishable from a
+//! success envelope that omits the field or serializes it as JSON `null`.
+//!
 //! # Example
 //!
 //! ```no_run
-//! use projectx_client::{Client, Credentials};
+//! use projectx_client::{Client, Credentials, ProviderList};
 //!
 //! # async fn example() -> Result<(), projectx_client::Error> {
 //! let credentials = Credentials::new("user", "api-key")?;
 //! let client = Client::builder(credentials).build()?;
 //! client.authenticate().await?;
-//! let accounts = client.search_active_accounts().await?;
-//! # let _ = accounts;
+//! match client.search_active_accounts().await? {
+//!     ProviderList::Listed(accounts) => {
+//!         for account in accounts {
+//!             println!("{}", account.name);
+//!         }
+//!     }
+//!     ProviderList::Absent => eprintln!("the provider omitted the account list"),
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -50,7 +60,7 @@ pub use models::{
     HistoryRequest, HistoryRequestBuilder, MarketDepth, MarketQuote, MarketTrade, ModifyOrder,
     ModifyOrderBuilder, OperationResponse, Order, OrderPage, OrderQuery, OrderQueryBuilder,
     OrderResponse, OrderSearch, OrderSortBy, OrderSortDirection, OrderStatus, OrderType,
-    PartialCloseContract, PlaceOrder, PlaceOrderBuilder, Position, PositionType,
+    PartialCloseContract, PlaceOrder, PlaceOrderBuilder, Position, PositionType, ProviderList,
     RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeQuery,
     TradeQueryBuilder, TradeSearch,
 };

@@ -96,10 +96,13 @@ async fn authenticates_then_searches_active_accounts() {
     login.assert_async().await;
     accounts.assert_async().await;
     all_accounts.assert_async().await;
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].id.get(), 42);
-    assert_eq!(result[0].balance, Some(Decimal::new(123_450, 2)));
-    assert!(all.is_empty());
+    let rows = result
+        .into_listed()
+        .unwrap_or_else(|| panic!("fixture account search must list explicitly"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id.get(), 42);
+    assert_eq!(rows[0].balance, Some(Decimal::new(123_450, 2)));
+    assert!(all.is_explicitly_empty());
 }
 
 #[tokio::test]

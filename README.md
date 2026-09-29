@@ -61,7 +61,7 @@ The complete public API is available on [docs.rs](https://docs.rs/projectx-clien
 ## Quick start
 
 ```rust
-use projectx_client::{Client, Credentials};
+use projectx_client::{Client, Credentials, ProviderList};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), projectx_client::Error> {
@@ -69,9 +69,13 @@ async fn main() -> Result<(), projectx_client::Error> {
     let client = Client::builder(credentials).build()?;
 
     client.authenticate().await?;
-    let accounts = client.search_active_accounts().await?;
-    for account in accounts {
-        println!("{}", account.name);
+    match client.search_active_accounts().await? {
+        ProviderList::Listed(accounts) => {
+            for account in accounts {
+                println!("{}", account.name);
+            }
+        }
+        ProviderList::Absent => eprintln!("the provider omitted the account list"),
     }
 
     Ok(())
@@ -85,6 +89,15 @@ By default a client targets the hosted TopstepX endpoints (`https://api.topstepx
 `rtc.topstepx.com` hubs). Select the hosted TheFuturesDesk deployment with
 `ClientBuilder::endpoints(Endpoints::thefuturesdesk())`, or `Endpoints::custom` for any other
 ProjectX Gateway deployment. Both credential types work against either hosted deployment.
+
+### List reads preserve presence
+
+Every successful list read returns `ProviderList`: `Listed` carries an explicit provider array —
+including an authoritative empty one that may establish flatness for positions, orders, or
+accounts — while `Absent` reports a success envelope that omitted the field or serialized it as
+JSON `null`, which is not evidence of an empty set. Only `Listed` rows should flatten a consumer's
+view; treat `Absent` as an unproven read. `ProviderList::unwrap_or_empty` recovers the old
+flatten-always behavior for callers that do not care about the distinction.
 
 ## Feature coverage
 
@@ -283,6 +296,17 @@ continuity. A continuity gap alone does not prove physical subscriptions ended.
 backlog age alone never creates a gap. The provider's SignalR messages do not establish a complete
 source sequence, so a consumer still needs its own replay or snapshot policy when continuity cannot
 be proved.
+
+### Migrating from 5.x
+
+Version 6 changes every successful list read from `Vec<T>` to `ProviderList<T>`:
+`search_active_accounts`, `search_accounts`, `available_contracts`, `search_contracts`,
+`retrieve_bars`, `search_orders`, `search_open_orders`, `search_trades`, `query_trades`, and
+`search_open_positions` return `ProviderList<T>`, and `OrderPage::orders` is a
+`ProviderList<Order>`. Match `ProviderList::Listed` to use the rows and treat
+`ProviderList::Absent` — a success envelope that omitted the field or carried JSON `null` — as an
+unproven read rather than an empty set; `unwrap_or_empty()` restores the previous flatten-always
+behavior. Rejection, status-inconsistency, and malformed-payload handling are unchanged.
 
 ### Migrating from 4.x
 
