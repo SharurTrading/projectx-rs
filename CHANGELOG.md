@@ -8,16 +8,6 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
-
-### Changed
-
-- Update the `rand` lockfile resolution from 0.10.2 to 0.10.3 and the `thiserror` lockfile
-  resolution from 2.0.20 to 2.0.21 through
-  [#56](https://github.com/SharurTrading/projectx-rs/pull/56).
-- Refresh all `taiki-e/install-action` CI pins from v2.87.14 to v2.87.20 through
-  [#55](https://github.com/SharurTrading/projectx-rs/pull/55).
-
 ## [5.0.1] - 2026-09-28
 
 ### Fixed
@@ -27,6 +17,24 @@ first public release.
   scientific notation, no longer silently round. Reducible trailing zeros are handled before
   representability checks, so exact values such as `100e-30` remain usable. Optional null and
   omitted fields keep their existing behavior; no currency rounding policy is introduced.
+- Make the paused-time ping/pong real-time fixture deterministic under the parallel test suite
+  through [#53](https://github.com/SharurTrading/projectx-rs/issues/53) and
+  [#50](https://github.com/SharurTrading/projectx-rs/issues/50). The fixture now answers the
+  client's socket probe explicitly, closes each mock-time window with an application-level witness
+  that proves the probe was acknowledged before the next advance, and keeps the live probe
+  deadline out of tokio's paused-clock auto-advance window; a new test pins that an unanswered
+  socket probe ends the generation.
+
+### Changed
+
+- Update the `rand` lockfile resolution from 0.10.2 to 0.10.3 and the `thiserror` lockfile
+  resolution from 2.0.20 to 2.0.21 through
+  [#56](https://github.com/SharurTrading/projectx-rs/pull/56).
+- Refresh all `taiki-e/install-action` CI pins from v2.87.14 to v2.87.20 through
+  [#55](https://github.com/SharurTrading/projectx-rs/pull/55).
+- Add the PROC-DECIDE procedure rule to the repository guide so the operator-decision reference in
+  PROC-ISSUE-TRIAGE resolves through
+  [#44](https://github.com/SharurTrading/projectx-rs/issues/44).
 
 ## [5.0.0] - 2026-09-25
 
@@ -231,8 +239,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
-[Unreleased]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...HEAD
-[5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...v5.0.1
+[5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...HEAD
 [5.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...v4.0.0
 [3.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.0...v3.0.1
