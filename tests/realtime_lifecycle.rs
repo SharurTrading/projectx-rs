@@ -1373,10 +1373,28 @@ async fn unanswered_socket_probe_ends_the_generation() {
         .await
         .unwrap_or_else(|error| panic!("fixture ready must signal: {error}"));
     tokio::time::pause();
-    // The first interval sends the probe; the second interval's tick observes
-    // it unanswered and must end the generation. Answering nothing needs no
-    // wall-clock scheduling, so this boundary is deterministic.
-    tokio::time::advance(Duration::from_secs(30)).await;
+    // Run the socket tasks past their start handshakes while time is frozen so
+    // the writer's probe timers are created on the paused grid before any
+    // advance; polled any later, their first deadline would land a full
+    // interval ahead of the frozen instant and pin nothing.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    // Step to the probe boundary in bounded settled advances: the first due
+    // probe tick sends the probe, and the next tick observing it still
+    // unanswered — not ordinary silence — ends the generation. The peer
+    // answers nothing, so reaching that boundary needs no wall-clock
+    // scheduling.
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        if !realtime.is_connected() {
+            break;
+        }
+    }
+    // The active probe deadline, rather than ordinary silence, ends this socket.
     assert!(matches!(
         events.recv().await,
         Some(RealtimeEvent::Disconnected)
