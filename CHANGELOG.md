@@ -32,9 +32,9 @@ first public release.
   [#56](https://github.com/SharurTrading/projectx-rs/pull/56).
 - Refresh all `taiki-e/install-action` CI pins from v2.87.14 to v2.87.20 through
   [#55](https://github.com/SharurTrading/projectx-rs/pull/55).
-- Add the PROC-DECIDE procedure rule to the repository guide so the operator-decision reference in
-  PROC-ISSUE-TRIAGE resolves through
-  [#44](https://github.com/SharurTrading/projectx-rs/issues/44).
+- Remove the unresolved `PROC-DECIDE` reference from the repository guide's difficulty ladder
+  through [#44](https://github.com/SharurTrading/projectx-rs/issues/44). The operator directed
+  removing the reference rather than defining a rule for it.
 
 ## [5.0.0] - 2026-09-25
 

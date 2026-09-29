@@ -120,24 +120,12 @@ domain translation.
   lifecycle decisions, research-heavy evidence work, wide cross-crate changes. medium — a strong
   coding agent: real engineering on a bounded surface the issue itself already specifies. easy — a
   basic coding agent: mechanical, well-scoped work with a clear acceptance check; operator-only
-  trackers (live verification, armed probes, decisions awaiting the operator under PROC-DECIDE) are
-  easy because no agent performs them at all. Difficulty is judged from the issue's own scope at
-  creation and re-set whenever understanding changes. A documentation label sits beside the kind
-  label when the work is docs, and any other repository label is welcome; none of those is
-  required. An issue missing one of the four is a finding on the next PR that touches it, and in
-  the tracker it is a gap the operator is asked to fill rather than a state to leave standing.
-- **PROC-DECIDE (Operator decisions):** Some decisions are the operator's alone and an agent must
-  not make them: publishing a release or creating or moving a version tag, live or armed
-  verification against provider systems, anything that moves real money or touches live trading,
-  credential handling beyond the synthetic fixtures, amending this guide's rules, and any choice
-  the operator has explicitly reserved. When work reaches such a decision, the agent stops and
-  files a Task issue stating the decision to be made, the options considered, and a recommendation,
-  classified under PROC-ISSUE-TRIAGE with the kind label `task` and the difficulty label
-  `difficulty: easy` because no agent performs the work; its priority follows the ladder, and a
-  decision that blocks the next step of an active plan is High. The issue is the only escalation
-  channel: a question asked only in a conversation, a PR comment, or a plan document does not
-  track the decision. Work resumes only after the operator answers on the issue, and the change
-  implementing the answer cites it.
+  trackers (live verification, armed probes, decisions awaiting the operator) are easy because no
+  agent performs them at all. Difficulty is judged from the issue's own scope at creation and
+  re-set whenever understanding changes. A documentation label sits beside the kind label when
+  the work is docs, and any other repository label is welcome; none of those is required.
+  An issue missing one of the four is a finding on the next PR that touches it, and in the
+  tracker it is a gap the operator is asked to fill rather than a state to leave standing.
 - **PROC-PR-TRIAGE:** A PR carries the same classification as the issue it closes, so the tracker
   and the PR list read as one body of work: exactly one kind label (bug / enhancement / task,
   matching what the diff changes), and the same Priority issue field set to its linked issue's
