@@ -51,14 +51,22 @@ impl fmt::Display for CodeText {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum AmbiguityOrigin {
-    /// The HTTP transport failed after the request may have been submitted.
+    /// The HTTP transport failed after the request may have been submitted,
+    /// in a way that is neither a timeout nor a connection failure.
     Transport,
+    /// The request timed out after submission; the provider may have
+    /// processed it.
+    TransportTimeout,
+    /// The connection could not be established.
+    TransportConnect,
     /// The provider answered with an HTTP status the client could not
     /// classify as a definitive outcome.
     HttpStatus(u16),
-    /// A response body arrived but could not be decoded into the required
-    /// result, including a success body that omitted a required field.
+    /// A response body arrived but could not be decoded.
     Decode,
+    /// A success body decoded but omitted a field required to identify the
+    /// result.
+    MissingResult,
     /// The response exceeded the configured size bound.
     ResponseTooLarge,
     /// The provider's success flag and required error code contradicted
@@ -66,14 +74,24 @@ pub enum AmbiguityOrigin {
     InconsistentStatus,
     /// The provider refused the request with HTTP 429.
     RateLimited,
+    /// The outcome was untrustworthy in a way this crate does not classify.
+    /// Every ambiguous mutation this crate constructs carries a provider
+    /// code or one of the classified origins; this variant reports an
+    /// outcome that reached the ambiguity mapping outside those classes.
+    Unclassified,
 }
 
 impl fmt::Display for AmbiguityOrigin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport => formatter.write_str("HTTP transport failed after submission"),
+            Self::TransportTimeout => formatter.write_str("request timed out after submission"),
+            Self::TransportConnect => formatter.write_str("connection could not be established"),
             Self::HttpStatus(status) => write!(formatter, "provider returned HTTP status {status}"),
             Self::Decode => formatter.write_str("response could not be decoded"),
+            Self::MissingResult => {
+                formatter.write_str("success response omitted a required result field")
+            }
             Self::ResponseTooLarge => {
                 formatter.write_str("response exceeded the configured size limit")
             }
@@ -81,6 +99,7 @@ impl fmt::Display for AmbiguityOrigin {
                 formatter.write_str("provider returned inconsistent status fields")
             }
             Self::RateLimited => formatter.write_str("provider rate limit refused the request"),
+            Self::Unclassified => formatter.write_str("unclassified transport-level failure"),
         }
     }
 }
@@ -228,8 +247,10 @@ pub enum Error {
     /// provider's code and published name so the caller can tell
     /// `OrderPending` apart from an unrecognized future code. When no provider
     /// rejection was decoded, `origin` instead carries the transport-level
-    /// evidence for the ambiguity. Exactly one of `code` and `origin` is
-    /// set: a decoded rejection is the evidence, and otherwise the origin is.
+    /// evidence for the ambiguity. Exactly one of `code` and `origin` is set
+    /// in every error this crate constructs: a decoded rejection is the
+    /// evidence, and otherwise a classified — or explicitly
+    /// [`AmbiguityOrigin::Unclassified`] — origin is.
     #[error(
         "{} outcome is ambiguous{}; reconcile provider state before retrying",
         operation,

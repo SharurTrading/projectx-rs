@@ -35,19 +35,18 @@ first public release.
   `RealtimeError::Protocol` when `type` is missing or not an unsigned integer,
   the same strictness the transport's record recognizer applies, where both
   shapes mark a transport gap.
-
-### Added
-
 - Carry the failure origin on `Error::AmbiguousMutation` under
   [#66](https://github.com/SharurTrading/projectx-rs/issues/66). When no
   provider rejection was decoded, the new `origin` field reports the
   transport-level evidence through the new `AmbiguityOrigin` enum — transport
-  failure, HTTP status, decode failure, response-size limit, inconsistent
-  status fields, or a 429 refusal — and the error's display text renders it,
-  so an operator can tell what kind of ambiguity occurred. Exactly one of
-  `code` and `origin` is set: a decoded pending or unknown rejection remains
-  the evidence itself. Constructing `Error::AmbiguousMutation` now requires
-  the additional field, which is part of this major's breaking set. A URL
+  failure with timeout and connection failures distinguished, an unclassified
+  HTTP status, a decode failure, a success body missing a required result
+  field, the response-size limit, inconsistent status fields, a 429 refusal,
+  or an explicit unclassified fallback — and the error's display text renders
+  it, so an operator can tell what kind of ambiguity occurred. Exactly one of
+  `code` and `origin` is set in every error this crate constructs: a decoded
+  pending or unknown rejection remains the evidence itself. Constructing
+  `Error::AmbiguousMutation` now requires the additional field. A URL
   construction failure before any network request now passes through
   unmodified instead of being reported as an ambiguous outcome.
 

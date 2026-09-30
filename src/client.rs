@@ -705,7 +705,7 @@ impl Client {
             operation: kind.operation(),
             code: None,
             name: None,
-            origin: Some(AmbiguityOrigin::Decode),
+            origin: Some(AmbiguityOrigin::MissingResult),
         })?;
         Ok(OrderResponse { order_id })
     }
@@ -1556,17 +1556,30 @@ impl MutationKind {
     }
 }
 
-/// Maps an untrustworthy mutation outcome to its transport-level origin, or
-/// `None` when a provider rejection was decoded and is itself the evidence.
-fn ambiguity_origin(error: &Error) -> Option<AmbiguityOrigin> {
+/// Maps an untrustworthy mutation outcome to its transport-level origin.
+///
+/// The mapping is total: outcomes with a decoded provider rejection are the
+/// evidence themselves (their callers never consult this function), and every
+/// other outcome reports a classified origin or
+/// [`AmbiguityOrigin::Unclassified`], so an ambiguous mutation this crate
+/// constructs never carries both no code and no origin.
+fn ambiguity_origin(error: &Error) -> AmbiguityOrigin {
     match error {
-        Error::Transport(_) => Some(AmbiguityOrigin::Transport),
-        Error::ProviderRateLimited { .. } => Some(AmbiguityOrigin::RateLimited),
-        Error::UnexpectedStatus { status } => Some(AmbiguityOrigin::HttpStatus(*status)),
-        Error::Decode(_) => Some(AmbiguityOrigin::Decode),
-        Error::ResponseTooLarge { .. } => Some(AmbiguityOrigin::ResponseTooLarge),
-        Error::InconsistentResponseStatus { .. } => Some(AmbiguityOrigin::InconsistentStatus),
-        _ => None,
+        Error::Transport(failure) => {
+            if failure.is_timeout() {
+                AmbiguityOrigin::TransportTimeout
+            } else if failure.is_connect() {
+                AmbiguityOrigin::TransportConnect
+            } else {
+                AmbiguityOrigin::Transport
+            }
+        }
+        Error::ProviderRateLimited { .. } => AmbiguityOrigin::RateLimited,
+        Error::UnexpectedStatus { status } => AmbiguityOrigin::HttpStatus(*status),
+        Error::Decode(_) => AmbiguityOrigin::Decode,
+        Error::ResponseTooLarge { .. } => AmbiguityOrigin::ResponseTooLarge,
+        Error::InconsistentResponseStatus { .. } => AmbiguityOrigin::InconsistentStatus,
+        _ => AmbiguityOrigin::Unclassified,
     }
 }
 
@@ -1590,15 +1603,12 @@ fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
         | Error::Encode(_)
         | Error::Url(_)
         | Error::LocallyRateLimited { .. } => error,
-        error => {
-            let origin = ambiguity_origin(&error);
-            Error::AmbiguousMutation {
-                operation: kind.operation(),
-                code: None,
-                name: None,
-                origin,
-            }
-        }
+        error => Error::AmbiguousMutation {
+            operation: kind.operation(),
+            code: None,
+            name: None,
+            origin: Some(ambiguity_origin(&error)),
+        },
     }
 }
 
@@ -1887,6 +1897,12 @@ mod tests {
                 },
                 AmbiguityOrigin::RateLimited,
             ),
+            (
+                Error::BackgroundTaskFailed {
+                    task: "fixture task",
+                },
+                AmbiguityOrigin::Unclassified,
+            ),
         ]
     }
 
@@ -1933,6 +1949,62 @@ mod tests {
         };
         assert_eq!(code, Some(6));
         assert_eq!(origin, None);
+    }
+
+    #[test]
+    fn every_constructible_non_passthrough_outcome_carries_exactly_one_evidence_field() {
+        // `Transport` is absent because `reqwest::Error` has no public
+        // constructor; every other variant of `Error` that the ambiguity
+        // mapping can receive is represented here or in the pass-through
+        // test below.
+        let errors = || {
+            vec![
+                Error::InvalidIdentifier {
+                    kind: "fixture",
+                    reason: "fixture",
+                },
+                Error::CredentialsRejected {
+                    code: 1,
+                    name: None,
+                },
+                Error::SessionValidationRejected {
+                    code: 1,
+                    name: None,
+                },
+                Error::InconsistentResponseStatus {
+                    success: true,
+                    code: 7,
+                },
+                Error::MissingAuthenticationToken,
+                Error::InvalidAuthenticationToken,
+                Error::AmbiguousSessionValidation,
+                Error::UnexpectedStatusResponse,
+                Error::BackgroundTaskFailed {
+                    task: "fixture task",
+                },
+                Error::UnexpectedStatus { status: 503 },
+                Error::ResponseTooLarge { limit_bytes: 16 },
+                Error::ProviderRateLimited {
+                    kind: RateLimitKind::General,
+                    retry_after: Duration::from_secs(1),
+                },
+                Error::Provider(ProviderError {
+                    code: 0,
+                    name: None,
+                }),
+            ]
+        };
+        for error in errors() {
+            let Error::AmbiguousMutation { code, origin, .. } =
+                ambiguous_mutation(MutationKind::PositionClose, error)
+            else {
+                panic!("a non-passthrough outcome must stay an ambiguous mutation");
+            };
+            assert!(
+                code.is_some() != origin.is_some(),
+                "exactly one of code and origin must be set, got code {code:?} origin {origin:?}"
+            );
+        }
     }
 
     #[test]

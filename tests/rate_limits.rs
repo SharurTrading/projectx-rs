@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use httpmock::prelude::*;
 use projectx_client::{
-    AccountId, BarUnit, Client, ContractId, Credentials, Endpoints, Error, HistoryRequest,
-    OrderType, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side, Timestamp,
+    AccountId, AmbiguityOrigin, BarUnit, Client, ContractId, Credentials, Endpoints, Error,
+    HistoryRequest, OrderType, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side,
+    Timestamp,
 };
 use serde_json::json;
 
@@ -271,6 +272,8 @@ async fn provider_rate_limit_after_mutation_send_is_ambiguous_and_never_retried(
         error,
         Error::AmbiguousMutation {
             operation: "order placement",
+            code: None,
+            origin: Some(AmbiguityOrigin::RateLimited),
             ..
         }
     ));

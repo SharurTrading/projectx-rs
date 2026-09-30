@@ -138,7 +138,12 @@ carry it alongside their code. The same number means different things to differe
 from `Client::cancel_order`. Codes the provider does not document stay `None`, and so does any
 outcome the client cannot attribute to one provider rejection: session validation returns the unit
 `Error::AmbiguousSessionValidation` for every code outside its three definitive rejections, and
-that variant carries no code. The provider's free-form `errorMessage` remains untrusted remote text
+that variant carries no code. When no provider rejection was decoded, `Error::AmbiguousMutation`
+instead carries an `origin` naming the transport-level evidence through the `AmbiguityOrigin`
+enum — transport failure with timeout and connection failures distinguished, an unclassified
+HTTP status, a decode failure, a success body missing a required result field, the response-size
+limit, inconsistent status fields, or a 429 refusal — so an operator can tell what kind of
+ambiguity occurred. The provider's free-form `errorMessage` remains untrusted remote text
 and is never exposed or logged.
 
 ### Trailing stops and bracket settings
@@ -307,6 +312,13 @@ Version 6 changes every successful list read from `Vec<T>` to `ProviderList<T>`:
 `ProviderList::Absent` — a success envelope that omitted the field or carried JSON `null` — as an
 unproven read rather than an empty set; `unwrap_or_empty()` restores the previous flatten-always
 behavior. Rejection, status-inconsistency, and malformed-payload handling are unchanged.
+
+`SignalRInvocation::from_value` now borrows the value (`&Value`) instead of consuming it and
+returns `Ok(None)` only for a frame whose `type` is another unsigned integer; a missing or
+malformed `type` discriminator is a `RealtimeError::Protocol` error, matching the transport
+path. `Error::AmbiguousMutation` gains an `origin: Option<AmbiguityOrigin>` field naming the
+transport-level evidence whenever no provider rejection was decoded, so constructing the variant
+now supplies that field; `AmbiguityOrigin` is exported for matching.
 
 ### Migrating from 4.x
 
@@ -507,8 +519,11 @@ in `tokio::time::timeout` when an application needs an end-to-end deadline.
 
 Money-moving methods never wait in a local throttle queue. If capacity is unavailable, they return
 `Error::LocallyRateLimited`, which guarantees that no request was sent and includes the budget and
-minimum retry delay. If the provider returns HTTP 429 after a mutation was sent, the client does not
-retry and returns `Error::AmbiguousMutation`; reconcile provider state before deciding what to do.
+minimum retry delay. The same no-request-was-sent guarantee holds for the other pre-send failures
+that pass through unmodified — missing authentication, invalid configuration, request-encoding
+failure, and endpoint-URL construction. If the provider returns HTTP 429 after a mutation was
+sent, the client does not retry and returns `Error::AmbiguousMutation`; reconcile provider state
+before deciding what to do.
 
 For query responses, HTTP 429 becomes `Error::ProviderRateLimited`. The client accepts both
 delta-seconds and HTTP-date forms of `Retry-After`, applies the longer of that delay and exponential
