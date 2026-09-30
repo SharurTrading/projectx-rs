@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [6.0.0] - 2026-09-29
+## [6.0.0] - 2026-09-30
 
 ### Breaking changes
 
@@ -58,6 +58,14 @@ first public release.
   clamped to it, and a duration the monotonic clock cannot represent still
   blocks admission until the latest representable instant, so no
   caller-supplied duration can silently skip a cooldown.
+
+### Changed
+
+- Add the `LAW-INVARIANT` review law to the repository guide through
+  [#60](https://github.com/SharurTrading/projectx-rs/pull/60), prohibiting fabricated fallback
+  values and silently swallowed invariant failures. The production audit under
+  [#59](https://github.com/SharurTrading/projectx-rs/issues/59) recorded every candidate's
+  disposition and confirmed no violations, so no library code changed.
 
 ## [5.0.1] - 2026-09-28
 
