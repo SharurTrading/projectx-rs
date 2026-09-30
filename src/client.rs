@@ -28,7 +28,7 @@ use crate::{
         AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrderBody,
         OrdersBody, PlaceOrderBody, PositionsBody, TradesBody,
     },
-    rate_limit::RateLimits,
+    rate_limit::{MAX_COOLDOWN, RateLimits},
     token::{TokenRevision, TokenSnapshot, TokenStore, UpdateOutcome},
 };
 
@@ -37,7 +37,6 @@ const DEFAULT_RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
-const MAX_SERVER_RETRY_AFTER: Duration = Duration::from_hours(24);
 const USER_AGENT: &str = concat!("projectx-client/", env!("CARGO_PKG_VERSION"));
 
 /// Authenticated `ProjectX` REST client.
@@ -1063,7 +1062,7 @@ impl Client {
     ) -> Duration {
         let retry_after = parse_retry_after(headers, SystemTime::now())
             .unwrap_or_else(|| self.rate_limits.limit(kind).window())
-            .min(MAX_SERVER_RETRY_AFTER);
+            .min(MAX_COOLDOWN);
         self.rate_limits.cool_down(kind, retry_after);
         retry_after
     }
@@ -1491,14 +1490,14 @@ fn retry_delay(error: &Error, backoff: Duration) -> Duration {
 fn parse_retry_after(headers: &header::HeaderMap, now: SystemTime) -> Option<Duration> {
     let raw = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = raw.parse::<u64>() {
-        return Some(Duration::from_secs(seconds).min(MAX_SERVER_RETRY_AFTER));
+        return Some(Duration::from_secs(seconds).min(MAX_COOLDOWN));
     }
     let deadline = httpdate::parse_http_date(raw).ok()?;
     Some(
         deadline
             .duration_since(now)
             .unwrap_or(Duration::ZERO)
-            .min(MAX_SERVER_RETRY_AFTER),
+            .min(MAX_COOLDOWN),
     )
 }
 
@@ -1784,10 +1783,7 @@ mod tests {
             header::RETRY_AFTER,
             header::HeaderValue::from_static("18446744073709551615"),
         );
-        assert_eq!(
-            parse_retry_after(&headers, UNIX_EPOCH),
-            Some(MAX_SERVER_RETRY_AFTER)
-        );
+        assert_eq!(parse_retry_after(&headers, UNIX_EPOCH), Some(MAX_COOLDOWN));
     }
 
     #[test]

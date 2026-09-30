@@ -15,14 +15,14 @@ const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
 const DEFAULT_GENERAL_REQUESTS: usize = 200;
 const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_mins(1);
 const MAX_INITIAL_CAPACITY: usize = 1_024;
-/// Ceiling for one provider cooldown applied to a budget's admission.
+/// Shared ceiling for one provider cooldown.
 ///
 /// Provider `Retry-After` values are unbounded remote input. The limiter
-/// clamps them locally so a duration beyond this ceiling becomes the ceiling
-/// and no caller-supplied duration can overflow the clock into a skipped
-/// cooldown. `client.rs` separately bounds the parsed values it reports to
-/// callers.
-const MAX_COOLDOWN: Duration = Duration::from_hours(24);
+/// clamps them to this ceiling so no caller-supplied duration can overflow
+/// the clock into a skipped cooldown, and the REST client bounds the
+/// `retry_after` it parses and reports from the same constant, keeping
+/// admission and `Error::ProviderRateLimited` in lockstep.
+pub(crate) const MAX_COOLDOWN: Duration = Duration::from_hours(24);
 
 /// Identifies one provider REST rate-limit budget.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -288,20 +288,26 @@ fn saturating_deadline(now: Instant, duration: Duration) -> Instant {
     if let Some(deadline) = now.checked_add(duration) {
         return deadline;
     }
-    // Binary-search the largest representable offset. Nanosecond precision
-    // converges in at most 64 steps and `low` is always representable.
-    let mut low = Duration::ZERO;
-    let mut high = duration;
-    while high.saturating_sub(low) > Duration::from_nanos(1) {
-        let mid_nanos = u128::midpoint(low.as_nanos(), high.as_nanos());
-        let mid = u64::try_from(mid_nanos).map_or(low, Duration::from_nanos);
-        if now.checked_add(mid).is_some() {
+    // The full duration overflows, so a representable offset exists below
+    // it. Binary-search nanosecond offsets capped at `u64::MAX`, the largest
+    // `Duration::from_nanos` can express. Every assignment to `low` follows
+    // a successful clock probe, so `deadline` is only ever set from a
+    // representable offset; the initial zero offset is representable by
+    // definition and can only survive the search when not even the next
+    // nanosecond is.
+    let mut low = 0_u64;
+    let mut high = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    let mut deadline = now;
+    while high - low > 1 {
+        let mid = u64::midpoint(low, high);
+        if let Some(probe) = now.checked_add(Duration::from_nanos(mid)) {
             low = mid;
+            deadline = probe;
         } else {
             high = mid;
         }
     }
-    now.checked_add(low).unwrap_or(now)
+    deadline
 }
 
 #[cfg(test)]
@@ -360,6 +366,17 @@ mod tests {
             limits.try_acquire(RateLimitKind::General),
             Err(Duration::from_hours(24)),
             "an unrepresentable provider cooldown must still block admission"
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_deadline_search_terminates_and_still_blocks() {
+        let now = Instant::now();
+        let deadline = saturating_deadline(now, Duration::MAX);
+        assert!(
+            deadline.saturating_duration_since(now) > Duration::from_hours(24),
+            "the saturated deadline must still block admission, found {:?}",
+            deadline.saturating_duration_since(now)
         );
     }
 

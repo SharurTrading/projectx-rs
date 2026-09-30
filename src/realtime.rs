@@ -115,21 +115,21 @@ impl PartialEq for SignalRInvocation {
 impl SignalRInvocation {
     /// Decodes a type-1 `SignalR` invocation from an in-memory JSON value.
     ///
-    /// Non-invocation frames return `Ok(None)`: a value without a `type`
-    /// field, and a frame whose `type` is another valid unsigned integer. A
-    /// `type` field that is present but not an unsigned integer is a failed
-    /// discriminator conversion rather than absence, and is reported as an
-    /// error.
+    /// Frames carrying another valid unsigned message type return `Ok(None)`.
+    /// A value without a `type` field, or whose `type` is not an unsigned
+    /// integer, is a malformed message rather than absence and is reported as
+    /// an error — the same strictness the transport's record recognizer
+    /// applies, where both shapes mark a transport gap.
     ///
     /// # Errors
     ///
-    /// Returns an error when the `type` field is present but not an unsigned
+    /// Returns an error when the `type` field is missing or not an unsigned
     /// integer, or when a type-1 frame has a missing or malformed target,
     /// contract identifier, or payload argument list.
     pub fn from_value(value: &Value) -> Result<Option<Self>, RealtimeError> {
-        let Some(discriminator) = value.get("type") else {
-            return Ok(None);
-        };
+        let discriminator = value
+            .get("type")
+            .ok_or(RealtimeError::Protocol("message type is missing"))?;
         match discriminator.as_u64() {
             None => {
                 return Err(RealtimeError::Protocol(
@@ -2021,6 +2021,10 @@ mod tests {
             json!({"type": -1}),
             json!({"type": null}),
             json!({"type": [1]}),
+            json!({}),
+            json!({"target": "GatewayTrade"}),
+            json!([1, 2]),
+            json!("frame"),
         ] {
             assert!(
                 matches!(
@@ -2031,15 +2035,13 @@ mod tests {
             );
         }
         for value in [
-            json!({}),
             json!({"type": 6}),
-            json!({"target": "GatewayTrade"}),
-            json!([1, 2]),
-            json!("frame"),
+            json!({"type": 3, "invocationId": "1"}),
+            json!({"type": 7, "allowReconnect": false}),
         ] {
             assert!(
                 matches!(SignalRInvocation::from_value(&value), Ok(None)),
-                "non-invocation {value} must remain a recognition miss"
+                "another valid message type {value} must remain a recognition miss"
             );
         }
     }

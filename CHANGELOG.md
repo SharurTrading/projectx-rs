@@ -26,13 +26,14 @@ first public release.
   distinction a consumer needs before flattening from a read
   ([SharurPlatform #964](https://github.com/SharurTrading/SharurPlatform/issues/964)).
   Rejection, inconsistent-status, and malformed-payload handling are unchanged.
-- Report a malformed `type` discriminator from `SignalRInvocation::from_value`
+- Report a missing or malformed `type` discriminator from
+  `SignalRInvocation::from_value`
   under [#65](https://github.com/SharurTrading/projectx-rs/issues/65). The
   recognizer now borrows the value (`&Value`) instead of consuming it, returns
-  `Ok(None)` only for a value without a `type` field or carrying another valid
-  unsigned message type, and returns `RealtimeError::Protocol` when `type` is
-  present but not an unsigned integer — the same strictness the wire path
-  (`from_json`) already applies.
+  `Ok(None)` only for a frame carrying another valid unsigned message type,
+  and returns `RealtimeError::Protocol` when `type` is missing or not an
+  unsigned integer — the same strictness the transport's record recognizer
+  applies, where both shapes mark a transport gap.
 
 ### Fixed
 
