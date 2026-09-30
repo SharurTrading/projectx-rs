@@ -15,6 +15,18 @@ const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
 const DEFAULT_GENERAL_REQUESTS: usize = 200;
 const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_mins(1);
 const MAX_INITIAL_CAPACITY: usize = 1_024;
+/// Shared ceiling for one provider cooldown.
+///
+/// Provider `Retry-After` values are unbounded remote input. The limiter
+/// clamps them to this ceiling so no caller-supplied duration can overflow
+/// the clock into a skipped cooldown, and the REST client bounds the
+/// `retry_after` it parses and reports from the same constant, keeping
+/// admission and `Error::ProviderRateLimited` in lockstep. A provider
+/// cooldown longer than the ceiling is deliberately shortened to it rather
+/// than blocking admission for a duration the caller cannot distinguish
+/// from permanent; the ceiling matches the longest parsed `Retry-After`
+/// the REST client will act on.
+pub(crate) const MAX_COOLDOWN: Duration = Duration::from_hours(24);
 
 /// Identifies one provider REST rate-limit budget.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -216,9 +228,7 @@ impl WindowLimiter {
     }
 
     fn cool_down(&self, now: Instant, retry_after: Duration) {
-        let Some(deadline) = now.checked_add(retry_after) else {
-            return;
-        };
+        let deadline = saturating_deadline(now, retry_after.min(MAX_COOLDOWN));
         let mut state = self.state.lock();
         if state
             .cooldown_until
@@ -274,6 +284,38 @@ impl WindowState {
     }
 }
 
+/// Returns `now + duration`, or the latest instant the monotonic clock can
+/// represent when the addition overflows, so a cooldown the clock cannot
+/// express still blocks admission to the end of the clock instead of being
+/// dropped.
+fn saturating_deadline(now: Instant, duration: Duration) -> Instant {
+    if let Some(deadline) = now.checked_add(duration) {
+        return deadline;
+    }
+    // The full duration overflows, so a representable offset exists below
+    // it. Binary-search nanosecond offsets capped at `u64::MAX`, the largest
+    // `Duration::from_nanos` can express. Every assignment to `low` follows
+    // a successful clock probe, so `deadline` is only ever set from a
+    // representable offset; the initial zero offset is representable by
+    // definition and can only survive the search when not even the next
+    // nanosecond is. That terminal case yields a no-op cooldown —
+    // `expire` clears it on the next admission attempt — because no future
+    // instant exists to block until.
+    let mut low = 0_u64;
+    let mut high = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    let mut deadline = now;
+    while high - low > 1 {
+        let mid = u64::midpoint(low, high);
+        if let Some(probe) = now.checked_add(Duration::from_nanos(mid)) {
+            low = mid;
+            deadline = probe;
+        } else {
+            high = mid;
+        }
+    }
+    deadline
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -319,6 +361,33 @@ mod tests {
         assert_eq!(limits.try_acquire(RateLimitKind::General), Err(cooldown));
         advance(cooldown).await;
         assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_cooldown_is_clamped_not_skipped() {
+        let limits = limits(2, Duration::from_secs(30));
+        limits.cool_down(RateLimitKind::General, Duration::MAX);
+
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_hours(24)),
+            "an unrepresentable provider cooldown must still block admission"
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_deadline_search_terminates_and_still_blocks() {
+        let now = Instant::now();
+        let deadline = saturating_deadline(now, Duration::MAX);
+        // The upper bound separates this from the fast path: a successful
+        // `checked_add(Duration::MAX)` would exceed the search's nanosecond
+        // cap, so passing both bounds proves the capped search ran.
+        let offset = deadline.saturating_duration_since(now);
+        assert!(
+            offset > Duration::from_hours(24) && offset <= Duration::from_nanos(u64::MAX),
+            "the saturated deadline must still block admission within the \
+             searched nanosecond domain, found {offset:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

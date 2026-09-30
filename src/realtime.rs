@@ -113,36 +113,48 @@ impl PartialEq for SignalRInvocation {
 }
 
 impl SignalRInvocation {
-    /// Decodes a type-1 `SignalR` invocation.
+    /// Decodes a type-1 `SignalR` invocation from an in-memory JSON value.
     ///
-    /// Non-invocation frames return `Ok(None)`.
+    /// A frame whose `type` is any other unsigned integer returns
+    /// `Ok(None)`, including message types this crate does not know. A value
+    /// without a `type` field, or whose `type` is not an unsigned integer,
+    /// is a malformed message rather than absence and is reported as an
+    /// error — the same strictness the transport's record recognizer
+    /// applies, where both shapes mark a transport gap.
     ///
     /// # Errors
     ///
-    /// Returns an error when a type-1 frame has a missing or malformed target,
+    /// Returns an error when the `type` field is missing or not an unsigned
+    /// integer, or when a type-1 frame has a missing or malformed target,
     /// contract identifier, or payload argument list.
-    pub fn from_value(value: Value) -> Result<Option<Self>, RealtimeError> {
-        if value.get("type").and_then(Value::as_i64) != Some(1) {
-            return Ok(None);
+    pub fn from_value(value: &Value) -> Result<Option<Self>, RealtimeError> {
+        let discriminator = value
+            .get("type")
+            .ok_or(RealtimeError::Protocol("message type is missing"))?;
+        match discriminator.as_u64() {
+            None => {
+                return Err(RealtimeError::Protocol(
+                    "message type was not an unsigned integer",
+                ));
+            }
+            Some(1) => {}
+            Some(_) => return Ok(None),
         }
-        let Value::Object(mut object) = value else {
-            return Err(RealtimeError::Protocol(
-                "invocation frame was not an object",
-            ));
-        };
+        let object = value.as_object().ok_or(RealtimeError::Protocol(
+            "invocation frame was not an object",
+        ))?;
         let target = object
-            .remove("target")
-            .and_then(|target| target.as_str().map(str::to_owned))
+            .get("target")
+            .and_then(|target| target.as_str())
             .ok_or(RealtimeError::Protocol("invocation target is missing"))?;
-        let Value::Array(arguments) = object
-            .remove("arguments")
+        let arguments = object
+            .get("arguments")
             .ok_or(RealtimeError::Protocol("invocation arguments are missing"))?
-        else {
-            return Err(RealtimeError::Protocol(
+            .as_array()
+            .ok_or(RealtimeError::Protocol(
                 "invocation arguments were not an array",
-            ));
-        };
-        let mut arguments = arguments.into_iter();
+            ))?;
+        let mut arguments = arguments.iter();
         let first = arguments
             .next()
             .ok_or(RealtimeError::Protocol("invocation payload is missing"))?;
@@ -164,14 +176,14 @@ impl SignalRInvocation {
         let entity = payload
             .get("data")
             .filter(|data| data.is_object() || data.is_array())
-            .unwrap_or(&payload);
+            .unwrap_or(payload);
         let raw_entity =
             RawValue::from_string(serde_json::to_string(entity).map_err(RealtimeError::Decode)?)
                 .map_err(RealtimeError::Decode)?;
         Ok(Some(Self {
-            target,
+            target: target.to_owned(),
             contract_id,
-            payload,
+            payload: payload.clone(),
             raw_entity,
         }))
     }
@@ -1991,7 +2003,7 @@ mod tests {
             "target": "GatewayTrade",
             "arguments": ["CON.F.US.MNQ.M26", {"price": 1.25}],
         });
-        let invocation = SignalRInvocation::from_value(value)
+        let invocation = SignalRInvocation::from_value(&value)
             .and_then(|value| value.ok_or(RealtimeError::Protocol("missing invocation")))
             .unwrap_or_else(|error| panic!("fixture invocation must decode: {error}"));
         assert_eq!(invocation.target(), "GatewayTrade");
@@ -2000,6 +2012,39 @@ mod tests {
             Some("CON.F.US.MNQ.M26")
         );
         assert_eq!(invocation.payload(), &json!({"price": 1.25}));
+    }
+
+    #[test]
+    fn invocation_recognizer_reports_malformed_discriminators_instead_of_absence() {
+        for value in [
+            json!({"type": "1", "target": "GatewayTrade", "arguments": []}),
+            json!({"type": 1.5}),
+            json!({"type": -1}),
+            json!({"type": null}),
+            json!({"type": [1]}),
+            json!({}),
+            json!({"target": "GatewayTrade"}),
+            json!([1, 2]),
+            json!("frame"),
+        ] {
+            assert!(
+                matches!(
+                    SignalRInvocation::from_value(&value),
+                    Err(RealtimeError::Protocol(_))
+                ),
+                "malformed discriminator {value} must be a typed protocol error"
+            );
+        }
+        for value in [
+            json!({"type": 6}),
+            json!({"type": 3, "invocationId": "1"}),
+            json!({"type": 7, "allowReconnect": false}),
+        ] {
+            assert!(
+                matches!(SignalRInvocation::from_value(&value), Ok(None)),
+                "another unsigned message type {value} must remain a recognition miss"
+            );
+        }
     }
 
     #[test]
@@ -2017,7 +2062,7 @@ mod tests {
             }),
         ] {
             assert!(matches!(
-                SignalRInvocation::from_value(value),
+                SignalRInvocation::from_value(&value),
                 Err(RealtimeError::Protocol(_))
             ));
         }
