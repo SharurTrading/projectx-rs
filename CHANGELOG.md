@@ -8,6 +8,25 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [6.0.0] - 2026-09-29
+
+### Breaking changes
+
+- Preserve list-field presence in successful list reads under
+  [#61](https://github.com/SharurTrading/projectx-rs/issues/61). Every list
+  read — `search_active_accounts`, `search_accounts`, `available_contracts`,
+  `search_contracts`, `retrieve_bars`, `search_orders`, `search_open_orders`,
+  `search_trades`, `query_trades`, and `search_open_positions` — now returns
+  `ProviderList`, whose `Listed` variant carries an explicit provider array,
+  including an authoritative empty one, while `Absent` reports a success
+  envelope that omitted the field or serialized it as JSON `null`.
+  `query_orders` keeps returning `OrderPage`, whose `orders` field is now a
+  `ProviderList<Order>`. The previous decoding
+  collapsed omitted, `null`, and `[]` into the same empty vector, losing the
+  distinction a consumer needs before flattening from a read
+  ([SharurPlatform #964](https://github.com/SharurTrading/SharurPlatform/issues/964)).
+  Rejection, inconsistent-status, and malformed-payload handling are unchanged.
+
 ## [5.0.1] - 2026-09-28
 
 ### Fixed
@@ -239,6 +258,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[6.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v3.0.1...v4.0.0

@@ -71,6 +71,8 @@ async fn active_mnq_contract(client: &Client, live: bool) -> Result<Contract, St
         .map_err(|_| "selected-catalog contract discovery timed out".to_owned())?
         .map_err(|error| format!("selected-catalog contract discovery failed: {error}"))?;
     contracts
+        .into_listed()
+        .ok_or_else(|| "provider omitted the selected-catalog contract list".to_owned())?
         .into_iter()
         .find(|contract| contract.active_contract && contract.symbol_id.as_str() == MNQ_SYMBOL_ID)
         .ok_or_else(|| {
@@ -383,7 +385,9 @@ async fn authenticates_discovers_and_handshakes_market_hub() {
     )
     .await
     .unwrap_or_else(|_| panic!("live active-account discovery timed out"))
-    .unwrap_or_else(|error| panic!("live active-account discovery failed: {error}"));
+    .unwrap_or_else(|error| panic!("live active-account discovery failed: {error}"))
+    .into_listed()
+    .unwrap_or_else(|| panic!("provider omitted the live active-account list"));
     assert!(!accounts.is_empty(), "provider returned no active accounts");
     assert_eq!(fixture.contract.symbol_id.as_str(), MNQ_SYMBOL_ID);
 
@@ -419,7 +423,9 @@ async fn downloads_recent_history_for_dynamically_discovered_mnq_contract() {
     let bars = tokio::time::timeout(LIVE_REQUEST_TIMEOUT, fixture.client.retrieve_bars(&request))
         .await
         .unwrap_or_else(|_| panic!("live MNQ history request timed out"))
-        .unwrap_or_else(|error| panic!("live MNQ history request failed: {error}"));
+        .unwrap_or_else(|error| panic!("live MNQ history request failed: {error}"))
+        .into_listed()
+        .unwrap_or_else(|| panic!("provider omitted the live MNQ history bar list"));
 
     assert!(!bars.is_empty(), "provider returned no recent MNQ history");
     assert!(bars.len() <= HISTORY_LIMIT as usize);

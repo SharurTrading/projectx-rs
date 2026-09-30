@@ -7,10 +7,15 @@ use httpmock::{Mock, prelude::*};
 use projectx_client::{
     AccountId, BarUnit, Bracket, CancelOrder, Client, CloseContract, ContractId, Credentials,
     Decimal, Endpoints, HistoryRequest, ModifyOrder, OrderId, OrderQuery, OrderSearch, OrderSortBy,
-    OrderSortDirection, OrderStatus, OrderType, PartialCloseContract, PlaceOrder, SearchContracts,
-    Side, Timestamp, TradeQuery, TradeSearch,
+    OrderSortDirection, OrderStatus, OrderType, PartialCloseContract, PlaceOrder, ProviderList,
+    SearchContracts, Side, Timestamp, TradeQuery, TradeSearch,
 };
 use serde_json::json;
+
+fn listed<T>(list: ProviderList<T>) -> Vec<T> {
+    list.into_listed()
+        .unwrap_or_else(|| panic!("fixture list read must carry an explicit list"))
+}
 
 fn fixture_client(server: &MockServer) -> Client {
     let credentials = Credentials::new("synthetic-user", "synthetic-key")
@@ -67,17 +72,21 @@ async fn contract_and_history_endpoints_match_provider_contracts() {
     let history = history_mock(&server).await;
 
     let client = authenticated_client(&server).await;
-    let contracts = client
-        .available_contracts(false)
-        .await
-        .unwrap_or_else(|error| panic!("available contracts must succeed: {error}"));
-    let searched = client
-        .search_contracts(&SearchContracts {
-            live: false,
-            search_text: "MNQ".to_owned(),
-        })
-        .await
-        .unwrap_or_else(|error| panic!("contract search must succeed: {error}"));
+    let contracts = listed(
+        client
+            .available_contracts(false)
+            .await
+            .unwrap_or_else(|error| panic!("available contracts must succeed: {error}")),
+    );
+    let searched = listed(
+        client
+            .search_contracts(&SearchContracts {
+                live: false,
+                search_text: "MNQ".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("contract search must succeed: {error}")),
+    );
     let contract = client
         .contract_by_id(&contract_id())
         .await
@@ -92,10 +101,12 @@ async fn contract_and_history_endpoints_match_provider_contracts() {
     .limit(100)
     .build()
     .unwrap_or_else(|error| panic!("fixture history request must be valid: {error}"));
-    let bars = client
-        .retrieve_bars(&history_request)
-        .await
-        .unwrap_or_else(|error| panic!("history must succeed: {error}"));
+    let bars = listed(
+        client
+            .retrieve_bars(&history_request)
+            .await
+            .unwrap_or_else(|error| panic!("history must succeed: {error}")),
+    );
 
     available.assert_async().await;
     search.assert_async().await;
@@ -139,21 +150,25 @@ async fn order_endpoints_use_typed_exact_requests() {
     .await;
 
     let client = authenticated_client(&server).await;
-    let orders = client
-        .search_orders(
-            &OrderSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
-                .unwrap_or_else(|error| panic!("fixture order search must be valid: {error}")),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("order search must succeed: {error:?}"));
+    let orders = listed(
+        client
+            .search_orders(
+                &OrderSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
+                    .unwrap_or_else(|error| panic!("fixture order search must be valid: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("order search must succeed: {error:?}")),
+    );
     let order = client
         .order_by_id(account_id(), order_id())
         .await
         .unwrap_or_else(|error| panic!("order lookup must succeed: {error}"));
-    let open_orders = client
-        .search_open_orders(account_id())
-        .await
-        .unwrap_or_else(|error| panic!("open-order search must succeed: {error}"));
+    let open_orders = listed(
+        client
+            .search_open_orders(account_id())
+            .await
+            .unwrap_or_else(|error| panic!("open-order search must succeed: {error}")),
+    );
     let stop_loss = Bracket::new(4, OrderType::Stop)
         .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
     let place_request =
@@ -274,14 +289,18 @@ async fn trailing_stop_requests_send_price_levels_and_searches_preserve_distance
 
     let search = OrderSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
         .unwrap_or_else(|error| panic!("order search must build: {error}"));
-    let orders = client
-        .search_orders(&search)
-        .await
-        .unwrap_or_else(|error| panic!("order search must succeed: {error}"));
-    let open_orders = client
-        .search_open_orders(account_id())
-        .await
-        .unwrap_or_else(|error| panic!("open-order search must succeed: {error}"));
+    let orders = listed(
+        client
+            .search_orders(&search)
+            .await
+            .unwrap_or_else(|error| panic!("order search must succeed: {error}")),
+    );
+    let open_orders = listed(
+        client
+            .search_open_orders(account_id())
+            .await
+            .unwrap_or_else(|error| panic!("open-order search must succeed: {error}")),
+    );
     assert_eq!(orders, open_orders);
     assert_eq!(orders.len(), 1);
     assert_eq!(orders[0].trail_price, Some(Decimal::new(150, 2)));
@@ -334,9 +353,10 @@ async fn v2_order_query_supports_complete_working_order_reconciliation() {
 
     query_mock.assert_async().await;
     assert_eq!(page.total_count, Some(2));
-    assert_eq!(page.orders.len(), 2);
-    assert_eq!(page.orders[0].status, OrderStatus::Open);
-    assert_eq!(page.orders[1].status, OrderStatus::Suspended);
+    let orders = listed(page.orders);
+    assert_eq!(orders.len(), 2);
+    assert_eq!(orders[0].status, OrderStatus::Open);
+    assert_eq!(orders[1].status, OrderStatus::Suspended);
 }
 
 #[tokio::test]
@@ -360,10 +380,12 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
     let ending_trades = ending_trades_query_mock(&server).await;
 
     let client = authenticated_client(&server).await;
-    let open_positions = client
-        .search_open_positions(account_id())
-        .await
-        .unwrap_or_else(|error| panic!("position search must succeed: {error}"));
+    let open_positions = listed(
+        client
+            .search_open_positions(account_id())
+            .await
+            .unwrap_or_else(|error| panic!("position search must succeed: {error}")),
+    );
     client
         .close_contract(&CloseContract {
             account_id: account_id(),
@@ -377,28 +399,34 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
         .partial_close_contract(&partial_close)
         .await
         .unwrap_or_else(|error| panic!("partial close must succeed: {error}"));
-    let executions = client
-        .search_trades(
-            &TradeSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
-                .unwrap_or_else(|error| panic!("fixture trade search must be valid: {error}")),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("trade search must succeed: {error}"));
+    let executions = listed(
+        client
+            .search_trades(
+                &TradeSearch::new(account_id(), timestamp("2026-01-01T00:00:00Z"), None)
+                    .unwrap_or_else(|error| panic!("fixture trade search must be valid: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("trade search must succeed: {error}")),
+    );
     let all_query = TradeQuery::builder(account_id())
         .build()
         .unwrap_or_else(|error| panic!("unbounded trade query must be valid: {error}"));
-    let all_executions = client
-        .query_trades(&all_query)
-        .await
-        .unwrap_or_else(|error| panic!("unbounded trade query must succeed: {error}"));
+    let all_executions = listed(
+        client
+            .query_trades(&all_query)
+            .await
+            .unwrap_or_else(|error| panic!("unbounded trade query must succeed: {error}")),
+    );
     let ending_query = TradeQuery::builder(account_id())
         .end_timestamp(timestamp("2026-01-02T00:00:00Z"))
         .build()
         .unwrap_or_else(|error| panic!("end-only trade query must be valid: {error}"));
-    let ending_executions = client
-        .query_trades(&ending_query)
-        .await
-        .unwrap_or_else(|error| panic!("end-only trade query must succeed: {error}"));
+    let ending_executions = listed(
+        client
+            .query_trades(&ending_query)
+            .await
+            .unwrap_or_else(|error| panic!("end-only trade query must succeed: {error}")),
+    );
 
     positions.assert_async().await;
     close.assert_async().await;
@@ -415,6 +443,67 @@ async fn position_and_trade_endpoints_match_provider_contracts() {
     assert_eq!(executions[0].commissions, Some(Decimal::new(45, 2)));
     assert_eq!(all_executions, executions);
     assert_eq!(ending_executions, executions);
+}
+
+#[tokio::test]
+async fn list_reads_keep_explicit_empty_distinct_from_missing_and_null() {
+    let position_shapes = [
+        (r#"{"success":true,"errorCode":0}"#, false),
+        (r#"{"positions":null,"success":true,"errorCode":0}"#, false),
+        (r#"{"positions":[],"success":true,"errorCode":0}"#, true),
+    ];
+    for (body, explicit_empty) in position_shapes {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/Position/searchOpen");
+                then.status(200).json_body(json!(
+                    serde_json::from_str::<serde_json::Value>(body)
+                        .unwrap_or_else(|error| panic!("fixture body must parse: {error}"))
+                ));
+            })
+            .await;
+        let client = authenticated_client(&server).await;
+        let positions = client
+            .search_open_positions(account_id())
+            .await
+            .unwrap_or_else(|error| panic!("position search must succeed: {error}"));
+        assert_eq!(positions.is_listed(), explicit_empty, "body: {body}");
+        assert_eq!(
+            positions.is_explicitly_empty(),
+            explicit_empty,
+            "body: {body}"
+        );
+    }
+
+    let account_shapes = [
+        (r#"{"success":true,"errorCode":0}"#, false),
+        (r#"{"accounts":null,"success":true,"errorCode":0}"#, false),
+        (r#"{"accounts":[],"success":true,"errorCode":0}"#, true),
+    ];
+    for (body, explicit_empty) in account_shapes {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/Account/search");
+                then.status(200).json_body(json!(
+                    serde_json::from_str::<serde_json::Value>(body)
+                        .unwrap_or_else(|error| panic!("fixture body must parse: {error}"))
+                ));
+            })
+            .await;
+        let client = authenticated_client(&server).await;
+        let accounts = client
+            .search_active_accounts()
+            .await
+            .unwrap_or_else(|error| panic!("account search must succeed: {error}"));
+        assert_eq!(accounts.is_listed(), explicit_empty, "body: {body}");
+        assert_eq!(
+            accounts.is_explicitly_empty(),
+            explicit_empty,
+            "body: {body}"
+        );
+    }
 }
 
 fn contract_json() -> serde_json::Value {
