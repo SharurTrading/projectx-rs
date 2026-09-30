@@ -677,6 +677,7 @@ async fn provider_rejection_text_is_the_endpoints_published_code_name() {
             operation: "order modification",
             code: Some(4),
             name: Some("Pending"),
+            origin: None,
         }
     ));
     assert_eq!(

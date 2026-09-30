@@ -17,11 +17,11 @@ use tokio::{task::JoinHandle, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Account, AccountId, ApplicationCredentials, Bar, CancelOrder, CloseContract, Contract,
-    Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, OperationResponse, Order,
-    OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch, PartialCloseContract, PlaceOrder,
-    Position, ProviderError, ProviderList, RateLimitConfig, RateLimitKind, RealtimeClient,
-    SearchContracts, Trade, TradeQuery, TradeSearch,
+    Account, AccountId, AmbiguityOrigin, ApplicationCredentials, Bar, CancelOrder, CloseContract,
+    Contract, Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, OperationResponse,
+    Order, OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch, PartialCloseContract,
+    PlaceOrder, Position, ProviderError, ProviderList, RateLimitConfig, RateLimitKind,
+    RealtimeClient, SearchContracts, Trade, TradeQuery, TradeSearch,
     credentials::AuthenticationCredentials,
     error_codes::ErrorCodeTable,
     models::{
@@ -705,6 +705,7 @@ impl Client {
             operation: kind.operation(),
             code: None,
             name: None,
+            origin: Some(AmbiguityOrigin::Decode),
         })?;
         Ok(OrderResponse { order_id })
     }
@@ -1555,6 +1556,20 @@ impl MutationKind {
     }
 }
 
+/// Maps an untrustworthy mutation outcome to its transport-level origin, or
+/// `None` when a provider rejection was decoded and is itself the evidence.
+fn ambiguity_origin(error: &Error) -> Option<AmbiguityOrigin> {
+    match error {
+        Error::Transport(_) => Some(AmbiguityOrigin::Transport),
+        Error::ProviderRateLimited { .. } => Some(AmbiguityOrigin::RateLimited),
+        Error::UnexpectedStatus { status } => Some(AmbiguityOrigin::HttpStatus(*status)),
+        Error::Decode(_) => Some(AmbiguityOrigin::Decode),
+        Error::ResponseTooLarge { .. } => Some(AmbiguityOrigin::ResponseTooLarge),
+        Error::InconsistentResponseStatus { .. } => Some(AmbiguityOrigin::InconsistentStatus),
+        _ => None,
+    }
+}
+
 fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
     match error {
         Error::Provider(provider) if kind.is_definitive_rejection(provider.code) => {
@@ -1564,17 +1579,26 @@ fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
             operation: kind.operation(),
             code: Some(provider.code),
             name: provider.name,
+            origin: None,
         },
+        // Every pass-through failure is a definitive pre-send outcome: no
+        // request left the process, so nothing is ambiguous. `Url` belongs
+        // here because endpoint construction precedes the network request.
         Error::NotAuthenticated
         | Error::UnexpectedStatus { status: 401 }
         | Error::Configuration(_)
         | Error::Encode(_)
+        | Error::Url(_)
         | Error::LocallyRateLimited { .. } => error,
-        _ => Error::AmbiguousMutation {
-            operation: kind.operation(),
-            code: None,
-            name: None,
-        },
+        error => {
+            let origin = ambiguity_origin(&error);
+            Error::AmbiguousMutation {
+                operation: kind.operation(),
+                code: None,
+                name: None,
+                origin,
+            }
+        }
     }
 }
 
@@ -1829,6 +1853,110 @@ mod tests {
             retry_delay(&provider_delay, Duration::from_secs(30)),
             Duration::from_secs(30)
         );
+    }
+
+    fn untrustworthy_mutation_errors() -> Vec<(Error, AmbiguityOrigin)> {
+        let decode_error = serde_json::from_str::<()>("not json")
+            .err()
+            .unwrap_or_else(|| panic!("fixture JSON must fail to decode"));
+        vec![
+            (
+                Error::UnexpectedStatus { status: 502 },
+                AmbiguityOrigin::HttpStatus(502),
+            ),
+            (
+                Error::UnexpectedStatus { status: 504 },
+                AmbiguityOrigin::HttpStatus(504),
+            ),
+            (Error::Decode(decode_error), AmbiguityOrigin::Decode),
+            (
+                Error::ResponseTooLarge { limit_bytes: 16 },
+                AmbiguityOrigin::ResponseTooLarge,
+            ),
+            (
+                Error::InconsistentResponseStatus {
+                    success: true,
+                    code: 7,
+                },
+                AmbiguityOrigin::InconsistentStatus,
+            ),
+            (
+                Error::ProviderRateLimited {
+                    kind: RateLimitKind::General,
+                    retry_after: Duration::from_secs(1),
+                },
+                AmbiguityOrigin::RateLimited,
+            ),
+        ]
+    }
+
+    #[test]
+    fn ambiguous_mutations_carry_their_failure_origin_and_stay_distinguishable() {
+        let mut rendered = Vec::new();
+        for (error, expected_origin) in untrustworthy_mutation_errors() {
+            let ambiguous = ambiguous_mutation(MutationKind::OrderPlacement, error);
+            let text = ambiguous.to_string();
+            let Error::AmbiguousMutation {
+                operation,
+                code,
+                name,
+                origin,
+            } = ambiguous
+            else {
+                panic!("untrustworthy outcome must stay an ambiguous mutation");
+            };
+            assert_eq!(operation, "order placement");
+            assert_eq!(code, None);
+            assert_eq!(name, None);
+            assert_eq!(origin, Some(expected_origin));
+            rendered.push(text);
+        }
+        let unique: std::collections::BTreeSet<_> = rendered.iter().map(String::as_str).collect();
+        assert_eq!(
+            unique.len(),
+            rendered.len(),
+            "distinct origins must render distinct evidence: {rendered:?}"
+        );
+        assert!(rendered[0].contains("HTTP status 502"));
+        assert!(rendered[1].contains("HTTP status 504"));
+
+        // A decoded non-definitive provider rejection is itself the evidence:
+        // the code is carried and no transport origin is fabricated beside it.
+        let Error::AmbiguousMutation { code, origin, .. } = ambiguous_mutation(
+            MutationKind::OrderPlacement,
+            Error::Provider(ProviderError {
+                code: 6,
+                name: Some("OrderPending"),
+            }),
+        ) else {
+            panic!("pending provider rejection must stay ambiguous");
+        };
+        assert_eq!(code, Some(6));
+        assert_eq!(origin, None);
+    }
+
+    #[test]
+    fn pre_send_failures_are_not_ambiguous_mutations() {
+        let errors = || {
+            vec![
+                Error::NotAuthenticated,
+                Error::Configuration("synthetic".to_owned()),
+                Error::LocallyRateLimited {
+                    kind: RateLimitKind::General,
+                    retry_after: Duration::from_secs(1),
+                },
+                Error::Url(
+                    "::".parse::<url::Url>()
+                        .err()
+                        .unwrap_or_else(|| panic!("fixture URL must fail to parse")),
+                ),
+            ]
+        };
+        for error in errors() {
+            let expected = error.to_string();
+            let mapped = ambiguous_mutation(MutationKind::OrderCancellation, error);
+            assert_eq!(mapped.to_string(), expected);
+        }
     }
 
     #[test]

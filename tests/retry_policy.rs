@@ -172,6 +172,7 @@ fn assert_ambiguous_mutation<T>(
             operation,
             code,
             name,
+            origin,
         }) => {
             assert_eq!(operation, expected_operation);
             assert_eq!(
@@ -182,6 +183,10 @@ fn assert_ambiguous_mutation<T>(
             assert_eq!(
                 name, expected_name,
                 "ambiguous {expected_operation} must keep the published code text"
+            );
+            assert!(
+                origin.is_none(),
+                "ambiguous {expected_operation} with a decoded provider code must not also carry a transport origin"
             );
         }
         Err(error) => {
