@@ -973,10 +973,12 @@ impl OrderQueryBuilder {
 ///
 /// let listed: ProviderList<u8> = ProviderList::Listed(Vec::new());
 /// assert!(listed.is_explicitly_empty());
+/// assert_eq!(listed.as_listed(), Some(&[][..]));
 /// assert_eq!(listed.into_listed(), Some(Vec::new()));
 ///
 /// let absent: ProviderList<u8> = ProviderList::Absent;
 /// assert!(!absent.is_listed());
+/// assert_eq!(absent.as_listed(), None);
 /// assert_eq!(absent.into_listed(), None);
 /// ```
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -989,6 +991,15 @@ pub enum ProviderList<T> {
 }
 
 impl<T> ProviderList<T> {
+    /// Returns the explicit rows by reference when the provider listed them.
+    #[must_use]
+    pub fn as_listed(&self) -> Option<&[T]> {
+        match self {
+            Self::Listed(rows) => Some(rows),
+            Self::Absent => None,
+        }
+    }
+
     /// Returns the explicit rows when the provider listed them.
     #[must_use]
     pub fn into_listed(self) -> Option<Vec<T>> {

@@ -476,6 +476,9 @@ impl Client {
 
     /// Retrieves active accounts for the authenticated user.
     ///
+    /// Returns a [`ProviderList`]; see [`Self::search_accounts`] for the
+    /// presence distinction.
+    ///
     /// # Errors
     ///
     /// Returns an error for authentication, transport, provider, or decode failures.
@@ -487,6 +490,7 @@ impl Client {
     ///
     /// Set `only_active_accounts` to `false` to include inactive accounts. Use
     /// [`Self::search_active_accounts`] when only active accounts are required.
+    ///
     /// Returns a [`ProviderList`]: an explicit array, including an
     /// authoritative empty one, is [`ProviderList::Listed`], while a success
     /// envelope that omits the field or serializes it as JSON `null` is
@@ -533,6 +537,7 @@ impl Client {
     /// Searches contracts using provider-native search text.
     ///
     /// The provider returns at most 20 matching contracts per request.
+    ///
     /// Returns a [`ProviderList`] preserving whether the provider carried the
     /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///
@@ -627,6 +632,7 @@ impl Client {
     /// including inactive bracket children. Use [`Self::query_orders`] and
     /// explicitly select every non-terminal status needed by the application
     /// when building a complete working-order reconciliation view.
+    ///
     /// Returns a [`ProviderList`] preserving whether the provider carried the
     /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///
@@ -655,10 +661,16 @@ impl Client {
     /// [`OrderStatus::PendingCancellation`](crate::OrderStatus::PendingCancellation), and
     /// [`OrderStatus::Suspended`](crate::OrderStatus::Suspended). The last of
     /// these includes inactive bracket children omitted by [`Self::search_open_orders`].
-    /// Paginated callers must continue until the returned page is exhausted;
-    /// request a total count when an explicit completion check is useful.
+    ///
     /// [`OrderPage::orders`] preserves whether the provider carried the array
-    /// explicitly; see [`Self::search_accounts`] for the distinction.
+    /// explicitly; see [`Self::search_accounts`] for the distinction. Continue
+    /// through every listed page until one is exhausted; request a total
+    /// count when an explicit completion check is useful. A page whose
+    /// orders are [`ProviderList::Absent`] carries no rows and ends the
+    /// pagination loop exactly like an explicit short or empty page: treat
+    /// `Absent` as page exhaustion, not as a retryable gap, and drive loop
+    /// control with [`ProviderList::is_listed`] or the listed row count —
+    /// [`ProviderList::is_explicitly_empty`] is `false` for `Absent`.
     ///
     /// # Errors
     ///
@@ -829,6 +841,7 @@ impl Client {
     ///
     /// Unlike [`Self::search_trades`], a [`TradeQuery`] can omit either or both
     /// timestamp bounds to express the provider's complete request schema.
+    ///
     /// Returns a [`ProviderList`] preserving whether the provider carried the
     /// array explicitly; see [`Self::search_accounts`] for the distinction.
     ///

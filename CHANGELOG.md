@@ -14,13 +14,14 @@ first public release.
 
 - Preserve list-field presence in successful list reads under
   [#61](https://github.com/SharurTrading/projectx-rs/issues/61). Every list
-  endpoint — `search_accounts`, `available_contracts`, `search_contracts`,
-  `retrieve_bars`, `search_orders`, `search_open_orders`, `query_orders`,
+  read — `search_active_accounts`, `search_accounts`, `available_contracts`,
+  `search_contracts`, `retrieve_bars`, `search_orders`, `search_open_orders`,
   `search_trades`, `query_trades`, and `search_open_positions` — now returns
   `ProviderList`, whose `Listed` variant carries an explicit provider array,
   including an authoritative empty one, while `Absent` reports a success
-  envelope that omitted the field or serialized it as JSON `null`;
-  `OrderPage::orders` is a `ProviderList<Order>` as well. The previous decoding
+  envelope that omitted the field or serialized it as JSON `null`.
+  `query_orders` keeps returning `OrderPage`, whose `orders` field is now a
+  `ProviderList<Order>`. The previous decoding
   collapsed omitted, `null`, and `[]` into the same empty vector, losing the
   distinction a consumer needs before flattening from a read
   ([SharurPlatform #964](https://github.com/SharurTrading/SharurPlatform/issues/964)).
