@@ -46,17 +46,90 @@ impl fmt::Display for CodeText {
     }
 }
 
-/// Renders the provider code of an ambiguous outcome, or nothing when the
-/// outcome never produced a decodable provider response.
-#[derive(Clone, Copy, Debug)]
-struct AmbiguousCodeText(Option<CodeText>);
+/// The transport-level origin of an ambiguous mutation outcome, when a
+/// provider rejection was not decoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AmbiguityOrigin {
+    /// The HTTP transport failed after the request may have been submitted,
+    /// in a way that is neither a timeout nor a connection failure.
+    Transport,
+    /// The request timed out after submission; the provider may have
+    /// processed it.
+    TransportTimeout,
+    /// The connection could not be established.
+    TransportConnect,
+    /// The provider answered with an HTTP status the client could not
+    /// classify as a definitive outcome.
+    HttpStatus(u16),
+    /// A response body arrived but could not be decoded.
+    Decode,
+    /// A success body decoded but omitted a field required to identify the
+    /// result.
+    MissingResult,
+    /// The response exceeded the configured size bound.
+    ResponseTooLarge,
+    /// The provider's success flag and required error code contradicted
+    /// each other.
+    InconsistentStatus,
+    /// The provider refused the request with HTTP 429.
+    RateLimited,
+    /// The outcome was untrustworthy in a way this crate does not classify.
+    /// Every ambiguous mutation this crate constructs carries a provider
+    /// code or one of the classified origins; this variant reports an
+    /// outcome that reached the ambiguity mapping outside those classes.
+    Unclassified,
+}
 
-impl fmt::Display for AmbiguousCodeText {
+impl fmt::Display for AmbiguityOrigin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(code) => write!(formatter, " ({code})"),
-            None => Ok(()),
+        match self {
+            Self::Transport => formatter.write_str("HTTP transport failed after submission"),
+            Self::TransportTimeout => formatter.write_str("request timed out after submission"),
+            Self::TransportConnect => formatter.write_str("connection could not be established"),
+            Self::HttpStatus(status) => write!(formatter, "provider returned HTTP status {status}"),
+            Self::Decode => formatter.write_str("response could not be decoded"),
+            Self::MissingResult => {
+                formatter.write_str("success response omitted a required result field")
+            }
+            Self::ResponseTooLarge => {
+                formatter.write_str("response exceeded the configured size limit")
+            }
+            Self::InconsistentStatus => {
+                formatter.write_str("provider returned inconsistent status fields")
+            }
+            Self::RateLimited => formatter.write_str("provider rate limit refused the request"),
+            Self::Unclassified => formatter.write_str("unclassified transport-level failure"),
         }
+    }
+}
+
+/// Renders a decoded provider rejection, or the transport-level origin when
+/// none was decoded, or nothing when the outcome produced no classifiable
+/// evidence.
+#[derive(Clone, Copy, Debug)]
+struct AmbiguityText {
+    code: Option<i32>,
+    name: Option<&'static str>,
+    origin: Option<AmbiguityOrigin>,
+}
+
+impl fmt::Display for AmbiguityText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = self.code {
+            return write!(
+                formatter,
+                " ({})",
+                CodeText {
+                    code,
+                    name: self.name
+                }
+            );
+        }
+        if let Some(origin) = self.origin {
+            return write!(formatter, " ({origin})");
+        }
+        Ok(())
     }
 }
 
@@ -172,11 +245,16 @@ pub enum Error {
     /// A decoded provider rejection that is documented as pending, unknown, or
     /// otherwise not a definitive rejection stays ambiguous, and carries the
     /// provider's code and published name so the caller can tell
-    /// `OrderPending` apart from an unrecognized future code.
+    /// `OrderPending` apart from an unrecognized future code. When no provider
+    /// rejection was decoded, `origin` instead carries the transport-level
+    /// evidence for the ambiguity. Exactly one of `code` and `origin` is set
+    /// in every error this crate constructs: a decoded rejection is the
+    /// evidence, and otherwise a classified — or explicitly
+    /// [`AmbiguityOrigin::Unclassified`] — origin is.
     #[error(
         "{} outcome is ambiguous{}; reconcile provider state before retrying",
         operation,
-        AmbiguousCodeText(code.map(|code| CodeText { code, name: *name }))
+        AmbiguityText { code: *code, name: *name, origin: *origin }
     )]
     AmbiguousMutation {
         /// Public-safe operation name.
@@ -186,6 +264,9 @@ pub enum Error {
         /// Provider-published name for `code`, when the endpoint's published
         /// error-code table defines it.
         name: Option<&'static str>,
+        /// Transport-level origin of the ambiguity, when no provider
+        /// rejection was decoded.
+        origin: Option<AmbiguityOrigin>,
     },
     /// A library-owned background task terminated unexpectedly.
     #[error("{task} background task terminated unexpectedly")]

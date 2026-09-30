@@ -53,7 +53,7 @@ mod token;
 pub use client::{Client, ClientBuilder, SessionValidator};
 pub use config::Endpoints;
 pub use credentials::{ApplicationCredentials, ApplicationCredentialsBuilder, Credentials};
-pub use error::{Error, ProviderError};
+pub use error::{AmbiguityOrigin, Error, ProviderError};
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 pub use models::{
     Account, Bar, BarUnit, Bracket, CancelOrder, CloseContract, Contract, DepthType,

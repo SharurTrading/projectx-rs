@@ -12,9 +12,9 @@ use std::{
 };
 
 use projectx_client::{
-    AccountId, Bracket, CancelOrder, Client, CloseContract, ContractId, Credentials, Decimal,
-    Endpoints, Error, ModifyOrder, OrderId, OrderType, PartialCloseContract, PlaceOrder,
-    ProviderError, Side,
+    AccountId, AmbiguityOrigin, Bracket, CancelOrder, Client, CloseContract, ContractId,
+    Credentials, Decimal, Endpoints, Error, ModifyOrder, OrderId, OrderType, PartialCloseContract,
+    PlaceOrder, ProviderError, Side,
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -172,6 +172,7 @@ fn assert_ambiguous_mutation<T>(
             operation,
             code,
             name,
+            origin,
         }) => {
             assert_eq!(operation, expected_operation);
             assert_eq!(
@@ -182,6 +183,10 @@ fn assert_ambiguous_mutation<T>(
             assert_eq!(
                 name, expected_name,
                 "ambiguous {expected_operation} must keep the published code text"
+            );
+            assert!(
+                origin.is_none(),
+                "ambiguous {expected_operation} with a decoded provider code must not also carry a transport origin"
             );
         }
         Err(error) => {
@@ -887,6 +892,8 @@ async fn inconsistent_mutation_status_is_an_ambiguous_outcome() {
         result,
         Err(Error::AmbiguousMutation {
             operation: "order placement",
+            code: None,
+            origin: Some(AmbiguityOrigin::InconsistentStatus),
             ..
         })
     ));
@@ -1483,6 +1490,8 @@ async fn order_placement_never_retries_a_server_response() {
         result,
         Err(Error::AmbiguousMutation {
             operation: "order placement",
+            code: None,
+            origin: Some(AmbiguityOrigin::HttpStatus(500)),
             ..
         })
     ));
@@ -1521,6 +1530,8 @@ async fn accepted_order_without_an_id_is_an_ambiguous_outcome() {
         result,
         Err(Error::AmbiguousMutation {
             operation: "order placement",
+            code: None,
+            origin: Some(AmbiguityOrigin::MissingResult),
             ..
         })
     ));
