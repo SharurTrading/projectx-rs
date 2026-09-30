@@ -30,10 +30,11 @@ first public release.
   `SignalRInvocation::from_value`
   under [#65](https://github.com/SharurTrading/projectx-rs/issues/65). The
   recognizer now borrows the value (`&Value`) instead of consuming it, returns
-  `Ok(None)` only for a frame carrying another valid unsigned message type,
-  and returns `RealtimeError::Protocol` when `type` is missing or not an
-  unsigned integer — the same strictness the transport's record recognizer
-  applies, where both shapes mark a transport gap.
+  `Ok(None)` for a frame whose `type` is any other unsigned integer — including
+  message types this crate does not know — and returns
+  `RealtimeError::Protocol` when `type` is missing or not an unsigned integer,
+  the same strictness the transport's record recognizer applies, where both
+  shapes mark a transport gap.
 
 ### Fixed
 

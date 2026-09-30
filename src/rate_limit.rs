@@ -21,7 +21,11 @@ const MAX_INITIAL_CAPACITY: usize = 1_024;
 /// clamps them to this ceiling so no caller-supplied duration can overflow
 /// the clock into a skipped cooldown, and the REST client bounds the
 /// `retry_after` it parses and reports from the same constant, keeping
-/// admission and `Error::ProviderRateLimited` in lockstep.
+/// admission and `Error::ProviderRateLimited` in lockstep. A provider
+/// cooldown longer than the ceiling is deliberately shortened to it rather
+/// than blocking admission for a duration the caller cannot distinguish
+/// from permanent; the ceiling matches the longest parsed `Retry-After`
+/// the REST client will act on.
 pub(crate) const MAX_COOLDOWN: Duration = Duration::from_hours(24);
 
 /// Identifies one provider REST rate-limit budget.
@@ -294,7 +298,9 @@ fn saturating_deadline(now: Instant, duration: Duration) -> Instant {
     // a successful clock probe, so `deadline` is only ever set from a
     // representable offset; the initial zero offset is representable by
     // definition and can only survive the search when not even the next
-    // nanosecond is.
+    // nanosecond is. That terminal case yields a no-op cooldown —
+    // `expire` clears it on the next admission attempt — because no future
+    // instant exists to block until.
     let mut low = 0_u64;
     let mut high = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
     let mut deadline = now;
@@ -373,10 +379,14 @@ mod tests {
     fn an_unrepresentable_deadline_search_terminates_and_still_blocks() {
         let now = Instant::now();
         let deadline = saturating_deadline(now, Duration::MAX);
+        // The upper bound separates this from the fast path: a successful
+        // `checked_add(Duration::MAX)` would exceed the search's nanosecond
+        // cap, so passing both bounds proves the capped search ran.
+        let offset = deadline.saturating_duration_since(now);
         assert!(
-            deadline.saturating_duration_since(now) > Duration::from_hours(24),
-            "the saturated deadline must still block admission, found {:?}",
-            deadline.saturating_duration_since(now)
+            offset > Duration::from_hours(24) && offset <= Duration::from_nanos(u64::MAX),
+            "the saturated deadline must still block admission within the \
+             searched nanosecond domain, found {offset:?}"
         );
     }
 

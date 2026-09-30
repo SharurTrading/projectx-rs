@@ -115,10 +115,11 @@ impl PartialEq for SignalRInvocation {
 impl SignalRInvocation {
     /// Decodes a type-1 `SignalR` invocation from an in-memory JSON value.
     ///
-    /// Frames carrying another valid unsigned message type return `Ok(None)`.
-    /// A value without a `type` field, or whose `type` is not an unsigned
-    /// integer, is a malformed message rather than absence and is reported as
-    /// an error — the same strictness the transport's record recognizer
+    /// A frame whose `type` is any other unsigned integer returns
+    /// `Ok(None)`, including message types this crate does not know. A value
+    /// without a `type` field, or whose `type` is not an unsigned integer,
+    /// is a malformed message rather than absence and is reported as an
+    /// error — the same strictness the transport's record recognizer
     /// applies, where both shapes mark a transport gap.
     ///
     /// # Errors
@@ -2041,7 +2042,7 @@ mod tests {
         ] {
             assert!(
                 matches!(SignalRInvocation::from_value(&value), Ok(None)),
-                "another valid message type {value} must remain a recognition miss"
+                "another unsigned message type {value} must remain a recognition miss"
             );
         }
     }
