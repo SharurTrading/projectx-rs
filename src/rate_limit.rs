@@ -15,6 +15,14 @@ const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
 const DEFAULT_GENERAL_REQUESTS: usize = 200;
 const DEFAULT_GENERAL_WINDOW: Duration = Duration::from_mins(1);
 const MAX_INITIAL_CAPACITY: usize = 1_024;
+/// Ceiling for one provider cooldown applied to a budget's admission.
+///
+/// Provider `Retry-After` values are unbounded remote input. The limiter
+/// clamps them locally so a duration beyond this ceiling becomes the ceiling
+/// and no caller-supplied duration can overflow the clock into a skipped
+/// cooldown. `client.rs` separately bounds the parsed values it reports to
+/// callers.
+const MAX_COOLDOWN: Duration = Duration::from_hours(24);
 
 /// Identifies one provider REST rate-limit budget.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -216,9 +224,7 @@ impl WindowLimiter {
     }
 
     fn cool_down(&self, now: Instant, retry_after: Duration) {
-        let Some(deadline) = now.checked_add(retry_after) else {
-            return;
-        };
+        let deadline = saturating_deadline(now, retry_after.min(MAX_COOLDOWN));
         let mut state = self.state.lock();
         if state
             .cooldown_until
@@ -274,6 +280,30 @@ impl WindowState {
     }
 }
 
+/// Returns `now + duration`, or the latest instant the monotonic clock can
+/// represent when the addition overflows, so a cooldown the clock cannot
+/// express still blocks admission to the end of the clock instead of being
+/// dropped.
+fn saturating_deadline(now: Instant, duration: Duration) -> Instant {
+    if let Some(deadline) = now.checked_add(duration) {
+        return deadline;
+    }
+    // Binary-search the largest representable offset. Nanosecond precision
+    // converges in at most 64 steps and `low` is always representable.
+    let mut low = Duration::ZERO;
+    let mut high = duration;
+    while high.saturating_sub(low) > Duration::from_nanos(1) {
+        let mid_nanos = u128::midpoint(low.as_nanos(), high.as_nanos());
+        let mid = u64::try_from(mid_nanos).map_or(low, Duration::from_nanos);
+        if now.checked_add(mid).is_some() {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    now.checked_add(low).unwrap_or(now)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -319,6 +349,18 @@ mod tests {
         assert_eq!(limits.try_acquire(RateLimitKind::General), Err(cooldown));
         advance(cooldown).await;
         assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_cooldown_is_clamped_not_skipped() {
+        let limits = limits(2, Duration::from_secs(30));
+        limits.cool_down(RateLimitKind::General, Duration::MAX);
+
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_hours(24)),
+            "an unrepresentable provider cooldown must still block admission"
+        );
     }
 
     #[tokio::test(start_paused = true)]

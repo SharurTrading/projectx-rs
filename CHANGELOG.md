@@ -26,6 +26,22 @@ first public release.
   distinction a consumer needs before flattening from a read
   ([SharurPlatform #964](https://github.com/SharurTrading/SharurPlatform/issues/964)).
   Rejection, inconsistent-status, and malformed-payload handling are unchanged.
+- Report a malformed `type` discriminator from `SignalRInvocation::from_value`
+  under [#65](https://github.com/SharurTrading/projectx-rs/issues/65). The
+  recognizer now borrows the value (`&Value`) instead of consuming it, returns
+  `Ok(None)` only for a value without a `type` field or carrying another valid
+  unsigned message type, and returns `RealtimeError::Protocol` when `type` is
+  present but not an unsigned integer — the same strictness the wire path
+  (`from_json`) already applies.
+
+### Fixed
+
+- Clamp provider cooldowns inside the rate limiter under
+  [#65](https://github.com/SharurTrading/projectx-rs/issues/65). A
+  `Retry-After`-derived duration beyond the limiter's 24-hour ceiling is
+  clamped to it, and a duration the monotonic clock cannot represent still
+  blocks admission until the latest representable instant, so no
+  caller-supplied duration can silently skip a cooldown.
 
 ## [5.0.1] - 2026-09-28
 
