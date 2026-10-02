@@ -196,6 +196,12 @@ pub enum Error {
     /// The provider rejected an otherwise valid request.
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// The caller refused the mutation before HTTP transport ownership transfer.
+    #[error("mutation handoff refused before transport")]
+    MutationHandoffRefused,
+    /// An HTTP request could not be built before transport ownership transfer.
+    #[error("HTTP request could not be built")]
+    RequestBuild(#[source] reqwest::Error),
     /// The HTTP transport failed.
     #[error("HTTP transport failed")]
     Transport(#[source] reqwest::Error),

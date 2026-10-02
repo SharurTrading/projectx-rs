@@ -146,6 +146,34 @@ limit, inconsistent status fields, or a 429 refusal — so an operator can tell 
 ambiguity occurred. The provider's free-form `errorMessage` remains untrusted remote text
 and is never exposed or logged.
 
+### One-use mutation handoffs
+
+`place_order_guarded`, `cancel_order_guarded`, `modify_order_guarded`,
+`close_contract_guarded`, and `partial_close_contract_guarded` accept an opaque,
+non-cloneable `MutationHandoff<F>`. Its synchronous `FnOnce() -> bool + Send`
+callback must perform the caller's atomic one-use claim; a read-only currency
+check is insufficient. The client owns no application permission state.
+
+The callback runs once after JSON encoding, authentication, synchronous shared
+rate admission, token capture, URL resolution, and request construction succeed.
+A successful claim immediately transfers that exact request to reqwest with no
+intervening SDK await or queue. This is HTTP request ownership transfer, not
+connection readiness, a socket write, provider acceptance, or execution. Pooling,
+connection and response waits belong to the HTTP transport after transfer; a
+later revocation cannot retract or replay the transferred request.
+
+A callback returning `false` yields `Error::MutationHandoffRefused` without
+handing a request to transport. SDK preflight failures never invoke the callback.
+The context value is consumed by the call, but the caller's permission remains
+unclaimed on those failures. Captured callback state is redacted in debug output.
+Existing mutation methods remain available and never retry.
+
+Explicit request construction also distinguishes `Error::RequestBuild`, a
+known pre-I/O failure, for both guarded and ordinary mutations. Previously such
+rare builder failures passed through the transport-error path and could be
+reported as ambiguous. Actual transport and response failures retain their
+existing ambiguity; query retry policy and shared rate limits are unchanged.
+
 ### Trailing stops and bracket settings
 
 For `OrderType::TrailingStop`, placement requires `.trail_price(Decimal)` containing an absolute

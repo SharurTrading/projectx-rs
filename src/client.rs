@@ -18,10 +18,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Account, AccountId, AmbiguityOrigin, ApplicationCredentials, Bar, CancelOrder, CloseContract,
-    Contract, Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, OperationResponse,
-    Order, OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch, PartialCloseContract,
-    PlaceOrder, Position, ProviderError, ProviderList, RateLimitConfig, RateLimitKind,
-    RealtimeClient, SearchContracts, Trade, TradeQuery, TradeSearch,
+    Contract, Credentials, Endpoints, Error, HistoryRequest, Hub, ModifyOrder, MutationHandoff,
+    OperationResponse, Order, OrderId, OrderPage, OrderQuery, OrderResponse, OrderSearch,
+    PartialCloseContract, PlaceOrder, Position, ProviderError, ProviderList, RateLimitConfig,
+    RateLimitKind, RealtimeClient, SearchContracts, Trade, TradeQuery, TradeSearch,
     credentials::AuthenticationCredentials,
     error_codes::ErrorCodeTable,
     models::{
@@ -694,20 +694,8 @@ impl Client {
     /// Returns an error for authentication, provider, decode, or ambiguous
     /// transport outcomes.
     pub async fn place_order(&self, request: &PlaceOrder) -> Result<OrderResponse, Error> {
-        let kind = MutationKind::OrderPlacement;
-        let response: Envelope<PlaceOrderBody> = self
-            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
+        self.place_order_with_handoff(request, None::<MutationHandoff<fn() -> bool>>)
             .await
-            .map_err(|error| ambiguous_mutation(kind, error))?;
-        let body = accepted(response, kind.error_code_table())
-            .map_err(|error| ambiguous_mutation(kind, error))?;
-        let order_id = body.order_id.ok_or(Error::AmbiguousMutation {
-            operation: kind.operation(),
-            code: None,
-            name: None,
-            origin: Some(AmbiguityOrigin::MissingResult),
-        })?;
-        Ok(OrderResponse { order_id })
     }
 
     /// Cancels an order exactly once.
@@ -855,12 +843,174 @@ impl Client {
         Ok(accepted(response, ErrorCodeTable::TradeSearch)?.trades)
     }
 
+    /// Performs [`Self::place_order`] with a one-use HTTP handoff claim.
+    ///
+    /// After encoding, authentication, synchronous rate admission and request
+    /// construction, the original callback atomically claims the caller's permission.
+    /// A successful claim immediately transfers the built request to reqwest;
+    /// connection readiness, network writes and provider acknowledgement follow later.
+    /// No SDK queue or await separates the claim from that ownership transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MutationHandoffRefused`] when the callback returns `false`,
+    /// without sending a request. Preflight errors do not invoke the callback.
+    /// Otherwise preserves [`Self::place_order`]'s result and no-retry policy.
+    pub async fn place_order_guarded<F>(
+        &self,
+        request: &PlaceOrder,
+        handoff: MutationHandoff<F>,
+    ) -> Result<OrderResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        self.place_order_with_handoff(request, Some(handoff)).await
+    }
+
+    /// Performs [`Self::cancel_order`] with a one-use HTTP handoff claim.
+    ///
+    /// After encoding, authentication, synchronous rate admission and request
+    /// construction, the original callback atomically claims the caller's permission.
+    /// A successful claim immediately transfers the built request to reqwest;
+    /// connection readiness, network writes and provider acknowledgement follow later.
+    /// No SDK queue or await separates the claim from that ownership transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MutationHandoffRefused`] when the callback returns `false`,
+    /// without sending a request. Preflight errors do not invoke the callback.
+    /// Otherwise preserves [`Self::cancel_order`]'s result and no-retry policy.
+    pub async fn cancel_order_guarded<F>(
+        &self,
+        request: &CancelOrder,
+        handoff: MutationHandoff<F>,
+    ) -> Result<OperationResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        self.mutation_with_handoff(MutationKind::OrderCancellation, request, Some(handoff))
+            .await
+    }
+
+    /// Performs [`Self::modify_order`] with a one-use HTTP handoff claim.
+    ///
+    /// After encoding, authentication, synchronous rate admission and request
+    /// construction, the original callback atomically claims the caller's permission.
+    /// A successful claim immediately transfers the built request to reqwest;
+    /// connection readiness, network writes and provider acknowledgement follow later.
+    /// No SDK queue or await separates the claim from that ownership transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MutationHandoffRefused`] when the callback returns `false`,
+    /// without sending a request. Preflight errors do not invoke the callback.
+    /// Otherwise preserves [`Self::modify_order`]'s result and no-retry policy.
+    pub async fn modify_order_guarded<F>(
+        &self,
+        request: &ModifyOrder,
+        handoff: MutationHandoff<F>,
+    ) -> Result<OperationResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        self.mutation_with_handoff(MutationKind::OrderModification, request, Some(handoff))
+            .await
+    }
+
+    /// Performs [`Self::close_contract`] with a one-use HTTP handoff claim.
+    ///
+    /// After encoding, authentication, synchronous rate admission and request
+    /// construction, the original callback atomically claims the caller's permission.
+    /// A successful claim immediately transfers the built request to reqwest;
+    /// connection readiness, network writes and provider acknowledgement follow later.
+    /// No SDK queue or await separates the claim from that ownership transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MutationHandoffRefused`] when the callback returns `false`,
+    /// without sending a request. Preflight errors do not invoke the callback.
+    /// Otherwise preserves [`Self::close_contract`]'s result and no-retry policy.
+    pub async fn close_contract_guarded<F>(
+        &self,
+        request: &CloseContract,
+        handoff: MutationHandoff<F>,
+    ) -> Result<OperationResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        self.mutation_with_handoff(MutationKind::PositionClose, request, Some(handoff))
+            .await
+    }
+
+    /// Performs [`Self::partial_close_contract`] with a one-use HTTP handoff claim.
+    ///
+    /// After encoding, authentication, synchronous rate admission and request
+    /// construction, the original callback atomically claims the caller's permission.
+    /// A successful claim immediately transfers the built request to reqwest;
+    /// connection readiness, network writes and provider acknowledgement follow later.
+    /// No SDK queue or await separates the claim from that ownership transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MutationHandoffRefused`] when the callback returns `false`,
+    /// without sending a request. Preflight errors do not invoke the callback.
+    /// Otherwise preserves [`Self::partial_close_contract`]'s result and no-retry policy.
+    pub async fn partial_close_contract_guarded<F>(
+        &self,
+        request: &PartialCloseContract,
+        handoff: MutationHandoff<F>,
+    ) -> Result<OperationResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        self.mutation_with_handoff(MutationKind::PartialPositionClose, request, Some(handoff))
+            .await
+    }
+
+    async fn place_order_with_handoff<F>(
+        &self,
+        request: &PlaceOrder,
+        handoff: Option<MutationHandoff<F>>,
+    ) -> Result<OrderResponse, Error>
+    where
+        F: FnOnce() -> bool + Send,
+    {
+        let kind = MutationKind::OrderPlacement;
+        let response: Envelope<PlaceOrderBody> = self
+            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request, handoff)
+            .await
+            .map_err(|error| ambiguous_mutation(kind, error))?;
+        let body = accepted(response, kind.error_code_table())
+            .map_err(|error| ambiguous_mutation(kind, error))?;
+        let order_id = body.order_id.ok_or(Error::AmbiguousMutation {
+            operation: kind.operation(),
+            code: None,
+            name: None,
+            origin: Some(AmbiguityOrigin::MissingResult),
+        })?;
+        Ok(OrderResponse { order_id })
+    }
+
     async fn mutation<T>(&self, kind: MutationKind, request: &T) -> Result<OperationResponse, Error>
     where
         T: Serialize + ?Sized,
     {
+        self.mutation_with_handoff(kind, request, None::<MutationHandoff<fn() -> bool>>)
+            .await
+    }
+
+    async fn mutation_with_handoff<T, F>(
+        &self,
+        kind: MutationKind,
+        request: &T,
+        handoff: Option<MutationHandoff<F>>,
+    ) -> Result<OperationResponse, Error>
+    where
+        T: Serialize + ?Sized,
+        F: FnOnce() -> bool + Send,
+    {
         let response: Envelope<EmptyBody> = self
-            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
+            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request, handoff)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
         accepted(response, kind.error_code_table())
@@ -927,7 +1077,10 @@ impl Client {
         let mut delay = self.retry_initial;
         loop {
             self.rate_limits.wait(kind).await;
-            match self.post_authenticated_once(kind, path, body).await {
+            match self
+                .post_authenticated_once(kind, path, body, None::<MutationHandoff<fn() -> bool>>)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(error) if attempt < self.max_retries && should_retry(&error) => {
                     attempt += 1;
@@ -939,34 +1092,38 @@ impl Client {
         }
     }
 
-    async fn post_authenticated_no_retry<T, R>(
+    async fn post_authenticated_no_retry<T, R, F>(
         &self,
         kind: RateLimitKind,
         path: &str,
         body: &T,
+        handoff: Option<MutationHandoff<F>>,
     ) -> Result<R, Error>
     where
         T: Serialize + ?Sized,
         R: DeserializeOwned,
+        F: FnOnce() -> bool + Send,
     {
         let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
         self.require_authentication()?;
         self.rate_limits
             .try_acquire(kind)
             .map_err(|retry_after| Error::LocallyRateLimited { kind, retry_after })?;
-        self.post_authenticated_once(kind, path, &encoded)
+        self.post_authenticated_once(kind, path, &encoded, handoff)
             .await
             .map(|(response, _basis)| response)
     }
 
-    async fn post_authenticated_once<R>(
+    async fn post_authenticated_once<R, F>(
         &self,
         kind: RateLimitKind,
         path: &str,
         body: &[u8],
+        handoff: Option<MutationHandoff<F>>,
     ) -> Result<(R, TokenSnapshot), Error>
     where
         R: DeserializeOwned,
+        F: FnOnce() -> bool + Send,
     {
         let token = self
             .token
@@ -977,8 +1134,13 @@ impl Client {
             .http
             .request(Method::POST, url)
             .bearer_auth(token.expose())
-            .body(body.to_vec());
-        let response = request.send().await.map_err(Error::Transport)?;
+            .body(body.to_vec())
+            .build()
+            .map_err(Error::RequestBuild)?;
+        if let Some(handoff) = handoff {
+            handoff.claim()?;
+        }
+        let response = self.http.execute(request).await.map_err(Error::Transport)?;
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = self.apply_provider_cooldown(kind, response.headers());
             return Err(Error::ProviderRateLimited { kind, retry_after });
@@ -1602,7 +1764,9 @@ fn ambiguous_mutation(kind: MutationKind, error: Error) -> Error {
         | Error::Configuration(_)
         | Error::Encode(_)
         | Error::Url(_)
-        | Error::LocallyRateLimited { .. } => error,
+        | Error::LocallyRateLimited { .. }
+        | Error::RequestBuild(_)
+        | Error::MutationHandoffRefused => error,
         error => Error::AmbiguousMutation {
             operation: kind.operation(),
             code: None,
@@ -2103,5 +2267,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn handoff_fixture_order() -> PlaceOrder {
+        PlaceOrder::builder(
+            AccountId::new(42).unwrap_or_else(|error| panic!("synthetic account: {error}")),
+            crate::ContractId::new("SYNTHETIC.CONTRACT")
+                .unwrap_or_else(|error| panic!("synthetic contract: {error}")),
+            crate::OrderType::Market,
+            crate::Side::Bid,
+            3,
+        )
+        .build()
+        .unwrap_or_else(|error| panic!("synthetic order: {error}"))
+    }
+
+    #[tokio::test]
+    async fn request_builder_failure_is_pre_io_for_both_mutation_entry_points() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("loopback listener: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("loopback address: {error}"));
+        let endpoints =
+            Endpoints::custom(&format!("http://{address}"), &format!("http://{address}"))
+                .unwrap_or_else(|error| panic!("loopback endpoints: {error}"));
+        let client = Client::builder(fixture_credentials())
+            .endpoints(endpoints)
+            .build()
+            .unwrap_or_else(|error| panic!("fixture client: {error}"));
+        // Deliberately represent an invalid private token state. Public authentication
+        // rejects this token, so this real RequestBuilder failure is private-boundary
+        // coverage, not a claim of a reachable valid public authentication workflow.
+        let invalid = "synthetic-private-token\n";
+        assert!(
+            client
+                .token
+                .begin_authentication()
+                .commit(invalid.to_owned())
+        );
+        let claims = AtomicUsize::new(0);
+        let guarded = client
+            .place_order_guarded(
+                &handoff_fixture_order(),
+                MutationHandoff::new(|| {
+                    claims.fetch_add(1, Ordering::SeqCst);
+                    true
+                }),
+            )
+            .await;
+        let unguarded = client.place_order(&handoff_fixture_order()).await;
+        for result in [guarded, unguarded] {
+            let Err(error @ Error::RequestBuild(_)) = result else {
+                panic!("a real build failure must be definitive before transport");
+            };
+            assert_eq!(error.to_string(), "HTTP request could not be built");
+            assert!(!format!("{error:?}").contains("synthetic-private-token"));
+            let source =
+                std::error::Error::source(&error).unwrap_or_else(|| panic!("build error source"));
+            assert!(!source.to_string().contains("synthetic-private-token"));
+            assert!(!should_retry(&error));
+        }
+        assert_eq!(claims.load(Ordering::SeqCst), 0);
+        assert!(
+            listener
+                .poll_accept(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+    }
+
+    struct RefusedEncoding;
+
+    impl Serialize for RefusedEncoding {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("synthetic encoding refusal"))
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_failure_does_not_invoke_the_original_mutation_claim() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let client = Client::builder(fixture_credentials())
+            .build()
+            .unwrap_or_else(|error| panic!("fixture client: {error}"));
+        let claims = AtomicUsize::new(0);
+        let result = client
+            .mutation_with_handoff(
+                MutationKind::OrderCancellation,
+                &RefusedEncoding,
+                Some(MutationHandoff::new(|| {
+                    claims.fetch_add(1, Ordering::SeqCst);
+                    true
+                })),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Encode(_))));
+        assert_eq!(claims.load(Ordering::SeqCst), 0);
     }
 }

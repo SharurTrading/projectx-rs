@@ -45,6 +45,7 @@ mod error;
 mod error_codes;
 mod ids;
 mod models;
+mod mutation_handoff;
 mod rate_limit;
 mod realtime;
 mod timestamp;
@@ -64,6 +65,7 @@ pub use models::{
     RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeQuery,
     TradeQueryBuilder, TradeSearch,
 };
+pub use mutation_handoff::MutationHandoff;
 pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
 pub use realtime::{
     Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, RealtimeGeneration,
