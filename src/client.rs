@@ -687,7 +687,10 @@ impl Client {
     /// [`Error::AmbiguousMutation`]; callers must reconcile open and recent
     /// orders before deciding whether another submission is safe.
     /// A returned order ID alone does not imply acceptance: provider code `2`
-    /// can accompany a rejected order record and remains [`Error::Provider`].
+    /// can accompany a rejected order record and remains [`Error::Provider`],
+    /// whose [`ProviderError::order_id`] carries that record's ID. Every
+    /// definitive rejection also carries the provider's free-form message
+    /// through [`ProviderError::untrusted_message`].
     ///
     /// # Errors
     ///
@@ -695,12 +698,13 @@ impl Client {
     /// transport outcomes.
     pub async fn place_order(&self, request: &PlaceOrder) -> Result<OrderResponse, Error> {
         let kind = MutationKind::OrderPlacement;
-        let response: Envelope<PlaceOrderBody> = self
+        let response: Envelope<PlaceOrderBody, PlaceOrderBody> = self
             .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
-        let body = accepted(response, kind.error_code_table())
-            .map_err(|error| ambiguous_mutation(kind, error))?;
+        let body =
+            accepted_with_detail(response, kind.error_code_table(), |detail| detail.order_id)
+                .map_err(|error| ambiguous_mutation(kind, error))?;
         let order_id = body.order_id.ok_or(Error::AmbiguousMutation {
             operation: kind.operation(),
             code: None,
@@ -1416,12 +1420,28 @@ impl ClientBuilder {
 /// Accepts a decoded provider envelope, naming any rejection with the code
 /// text the provider publishes for the responding endpoint.
 fn accepted<T>(response: Envelope<T>, codes: ErrorCodeTable) -> Result<T, Error> {
+    accepted_with_detail(response, codes, |_| None)
+}
+
+/// Accepts a decoded provider envelope like [`accepted`], also carrying the
+/// order record an endpoint returns beside its rejection.
+fn accepted_with_detail<T, R>(
+    response: Envelope<T, R>,
+    codes: ErrorCodeTable,
+    rejected_order: fn(R) -> Option<OrderId>,
+) -> Result<T, Error> {
     match response {
         Envelope::Accepted(body) => Ok(body),
-        Envelope::Rejected { error_code } => Err(ProviderError {
-            code: error_code,
-            name: codes.name(error_code),
-        }
+        Envelope::Rejected {
+            error_code,
+            error_message,
+            detail,
+        } => Err(ProviderError::new(
+            error_code,
+            codes.name(error_code),
+            rejected_order(detail),
+            error_message,
+        )
         .into()),
         Envelope::InconsistentStatus {
             success,
@@ -1940,10 +1960,7 @@ mod tests {
         // the code is carried and no transport origin is fabricated beside it.
         let Error::AmbiguousMutation { code, origin, .. } = ambiguous_mutation(
             MutationKind::OrderPlacement,
-            Error::Provider(ProviderError {
-                code: 6,
-                name: Some("OrderPending"),
-            }),
+            Error::Provider(ProviderError::new(6, Some("OrderPending"), None, None)),
         ) else {
             panic!("pending provider rejection must stay ambiguous");
         };
@@ -1988,10 +2005,7 @@ mod tests {
                     kind: RateLimitKind::General,
                     retry_after: Duration::from_secs(1),
                 },
-                Error::Provider(ProviderError {
-                    code: 0,
-                    name: None,
-                }),
+                Error::Provider(ProviderError::new(0, None, None, None)),
             ]
         };
         for error in errors() {

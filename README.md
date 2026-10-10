@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=6.0.0)](https://crates.io/crates/projectx-client/6.0.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/6.0.0?v=6.0.0)](https://docs.rs/projectx-client/6.0.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=6.1.0)](https://crates.io/crates/projectx-client/6.1.0)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/6.1.0?v=6.1.0)](https://docs.rs/projectx-client/6.1.0/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 An async, provider-native Rust client for the ProjectX Gateway API.
@@ -143,8 +143,17 @@ instead carries an `origin` naming the transport-level evidence through the `Amb
 enum — transport failure with timeout and connection failures distinguished, an unclassified
 HTTP status, a decode failure, a success body missing a required result field, the response-size
 limit, inconsistent status fields, or a 429 refusal — so an operator can tell what kind of
-ambiguity occurred. The provider's free-form `errorMessage` remains untrusted remote text
-and is never exposed or logged.
+ambiguity occurred.
+
+Every `Error::Provider` rejection, from a query or a definitive mutation rejection, also carries
+the provider's free-form `errorMessage` through `ProviderError::untrusted_message`, or `None` when
+the provider sent `null` or omitted it. The
+text is untrusted remote input, passed through unaltered and bounded only by the configured
+response-size limit: clean or escape it before displaying or logging it, and decide outcomes from
+the code, never from the message. The client never logs it, it never appears in an error's
+`Display` output, and `Debug` output shows only `Some("[REDACTED]")` in its place. Ambiguous
+outcomes carry no message. A non-text `errorMessage` on a rejection is a decode failure, so on a
+mutation it is reported as `Error::AmbiguousMutation`.
 
 ### Trailing stops and bracket settings
 
@@ -161,7 +170,10 @@ references. The builders preserve exact decimal inputs and leave quote-dependent
 
 Attaching either bracket leg requires Auto OCO Brackets in the account's platform risk settings.
 Position Brackets mode produces placement code `2` (`OrderRejected`) and can still return an ID for
-the rejected record; the client correctly returns `Error::Provider`. [Cancellation][order-cancel] is
+the rejected record; the client correctly returns `Error::Provider`, and `ProviderError::order_id`
+carries that ID. The record was not accepted, so its ID never implies a working order. A rejected
+placement whose `orderId` is not a valid order ID is a decode failure and is reported as
+`Error::AmbiguousMutation`. [Cancellation][order-cancel] is
 supported only for simulated accounts that are not copy-trading followers; other accounts receive
 code `6` (`AccountRejected`).
 

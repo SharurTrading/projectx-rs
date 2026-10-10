@@ -7,7 +7,7 @@ use std::{fmt, time::Duration};
 
 use thiserror::Error;
 
-use crate::RateLimitKind;
+use crate::{OrderId, RateLimitKind};
 
 /// A provider-declared failed operation.
 ///
@@ -15,7 +15,11 @@ use crate::RateLimitKind;
 /// different things to different endpoints: code `2` is `OrderRejected` for
 /// `/api/Order/place` and `OrderNotFound` for `/api/Order/cancel`. [`Self::name`]
 /// carries the published text for the endpoint that produced the rejection.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+///
+/// The provider's free-form `errorMessage` is available only through
+/// [`Self::untrusted_message`]. It never appears in this error's `Display`
+/// output, and `Debug` output shows only whether a message is present.
+#[derive(Clone, Eq, Error, PartialEq)]
 #[non_exhaustive]
 #[error("ProjectX rejected the operation ({})", CodeText { code: *code, name: *name })]
 pub struct ProviderError {
@@ -25,9 +29,59 @@ pub struct ProviderError {
     /// published error-code table defines it.
     ///
     /// Undocumented codes, including codes the provider adds after this crate
-    /// was published, are `None`. The provider's free-form `errorMessage` is
-    /// untrusted remote text and is never exposed here.
+    /// was published, are `None`.
     pub name: Option<&'static str>,
+    /// Order record the provider created for a rejected placement, when it
+    /// returned one.
+    ///
+    /// Only [`Client::place_order`](crate::Client::place_order) reads this
+    /// field; every other operation reports `None`. The record exists on the
+    /// provider but was not accepted, so it never implies a working order.
+    pub order_id: Option<OrderId>,
+    message: Option<Box<str>>,
+}
+
+impl ProviderError {
+    /// Creates a rejection from its decoded provider fields.
+    pub(crate) fn new(
+        code: i32,
+        name: Option<&'static str>,
+        order_id: Option<OrderId>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            code,
+            name,
+            order_id,
+            message: message.map(String::into_boxed_str),
+        }
+    }
+
+    /// Returns the provider's free-form `errorMessage`, when it sent one.
+    ///
+    /// The text is untrusted remote input, passed through exactly as the
+    /// provider sent it: it may contain control characters, terminal escape
+    /// sequences, markup, line breaks, or account details, and its length is
+    /// bounded only by the client's configured response-size limit. Clean or
+    /// escape it before displaying or logging it. It is `None` when the
+    /// provider sent `null` or omitted the field. Decide the outcome from
+    /// [`Self::code`], never from this text.
+    #[must_use]
+    pub fn untrusted_message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+impl fmt::Debug for ProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderError")
+            .field("code", &self.code)
+            .field("name", &self.name)
+            .field("order_id", &self.order_id)
+            .field("message", &self.message.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Renders a provider error code together with its published name.
