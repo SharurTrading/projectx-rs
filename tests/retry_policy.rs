@@ -202,15 +202,16 @@ fn assert_definitive_provider_rejection<T>(
     result: Result<T, Error>,
     expected_code: i32,
     expected_name: &'static str,
-) {
+) -> ProviderError {
     match result {
-        Err(Error::Provider(ProviderError { code, name, .. })) => {
-            assert_eq!(code, expected_code);
+        Err(Error::Provider(rejection)) => {
+            assert_eq!(rejection.code, expected_code);
             assert_eq!(
-                name,
+                rejection.name,
                 Some(expected_name),
                 "provider rejection {expected_code} must keep the published code text"
             );
+            rejection
         }
         Err(error) => panic!("expected provider rejection {expected_code}, got {error}"),
         Ok(_) => panic!("expected provider rejection {expected_code}, got success"),
@@ -1079,12 +1080,21 @@ async fn documented_position_close_rejections_carry_their_published_names() {
             r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
         ),
         // /api/Position/closeContract: OrderRejected, then AccountRejected.
-        (200, r#"{"success":false,"errorCode":5}"#),
+        (
+            200,
+            r#"{"success":false,"errorCode":5,"errorMessage":"synthetic close rejection"}"#,
+        ),
         (200, r#"{"success":false,"errorCode":8}"#),
         // /api/Position/partialCloseContract: InvalidCloseSize, OrderRejected,
         // then AccountRejected.
-        (200, r#"{"success":false,"errorCode":5}"#),
-        (200, r#"{"success":false,"errorCode":6}"#),
+        (
+            200,
+            r#"{"success":false,"errorCode":5,"errorMessage":"synthetic size rejection"}"#,
+        ),
+        (
+            200,
+            r#"{"success":false,"errorCode":6,"errorMessage":null}"#,
+        ),
         (200, r#"{"success":false,"errorCode":9}"#),
     ])
     .await;
@@ -1095,27 +1105,27 @@ async fn documented_position_close_rejections_carry_their_published_names() {
         .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
     let requests = mutation_requests();
 
-    assert_definitive_provider_rejection(
+    let close_rejected = assert_definitive_provider_rejection(
         client.close_contract(&requests.close).await,
         5,
         "OrderRejected",
     );
-    assert_definitive_provider_rejection(
+    let close_account_rejected = assert_definitive_provider_rejection(
         client.close_contract(&requests.close).await,
         8,
         "AccountRejected",
     );
-    assert_definitive_provider_rejection(
+    let partial_size_rejected = assert_definitive_provider_rejection(
         client.partial_close_contract(&requests.partial_close).await,
         5,
         "InvalidCloseSize",
     );
-    assert_definitive_provider_rejection(
+    let partial_order_rejected = assert_definitive_provider_rejection(
         client.partial_close_contract(&requests.partial_close).await,
         6,
         "OrderRejected",
     );
-    assert_definitive_provider_rejection(
+    let partial_account_rejected = assert_definitive_provider_rejection(
         client.partial_close_contract(&requests.partial_close).await,
         9,
         "AccountRejected",
@@ -1125,6 +1135,29 @@ async fn documented_position_close_rejections_carry_their_published_names() {
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
     assert_eq!(count, 6);
+    assert_eq!(
+        close_rejected.untrusted_message(),
+        Some("synthetic close rejection")
+    );
+    assert_eq!(close_account_rejected.untrusted_message(), None);
+    assert_eq!(
+        partial_size_rejected.untrusted_message(),
+        Some("synthetic size rejection")
+    );
+    assert_eq!(partial_order_rejected.untrusted_message(), None);
+    assert_eq!(partial_account_rejected.untrusted_message(), None);
+    for rejection in [
+        close_rejected,
+        close_account_rejected,
+        partial_size_rejected,
+        partial_order_rejected,
+        partial_account_rejected,
+    ] {
+        assert_eq!(
+            rejection.order_id, None,
+            "only a placement rejection carries an order record"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1153,23 +1186,196 @@ async fn documented_order_rejections_remain_definitive_even_with_an_order_id() {
         .stop_loss_bracket(stop_loss)
         .build()
         .unwrap_or_else(|error| panic!("fixture placement must be valid: {error}"));
-    assert_definitive_provider_rejection(client.place_order(&place).await, 2, "OrderRejected");
+    let placement =
+        assert_definitive_provider_rejection(client.place_order(&place).await, 2, "OrderRejected");
 
     let cancel = CancelOrder {
         account_id,
         order_id,
     };
-    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6, "AccountRejected");
-    assert_definitive_provider_rejection(client.cancel_order(&cancel).await, 6, "AccountRejected");
+    let follower_cancel = assert_definitive_provider_rejection(
+        client.cancel_order(&cancel).await,
+        6,
+        "AccountRejected",
+    );
+    let live_cancel = assert_definitive_provider_rejection(
+        client.cancel_order(&cancel).await,
+        6,
+        "AccountRejected",
+    );
     let modify = ModifyOrder::builder(account_id, order_id)
         .trail_price(Decimal::new(10_401, 2))
         .build()
         .unwrap_or_else(|error| panic!("fixture modification must be valid: {error}"));
-    assert_definitive_provider_rejection(client.modify_order(&modify).await, 3, "Rejected");
+    let modification =
+        assert_definitive_provider_rejection(client.modify_order(&modify).await, 3, "Rejected");
     let count = server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
     assert_eq!(count, 5);
+
+    assert_eq!(placement.order_id, Some(order_id));
+    assert_eq!(
+        placement.untrusted_message(),
+        Some("Brackets cannot be used with Position Brackets. You must enable Auto OCO Brackets.")
+    );
+    assert_eq!(
+        follower_cancel.untrusted_message(),
+        Some("Follower accounts cannot cancel orders")
+    );
+    assert_eq!(follower_cancel.order_id, None);
+    assert_eq!(
+        live_cancel.untrusted_message(),
+        Some("Live accounts not supported")
+    );
+    assert_eq!(
+        modification.untrusted_message(),
+        Some("Invalid trail price. Price is not aligned to tick size.")
+    );
+    assert_eq!(modification.order_id, None);
+}
+
+#[tokio::test]
+async fn placement_rejection_with_null_or_absent_details_carries_neither() {
+    let (address, server) = start_server(vec![
+        (
+            200,
+            r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
+        ),
+        (
+            200,
+            r#"{"orderId":null,"success":false,"errorCode":2,"errorMessage":null}"#,
+        ),
+        (200, r#"{"success":false,"errorCode":2}"#),
+    ])
+    .await;
+    let client = client(address, 0);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
+    let requests = mutation_requests();
+
+    let explicit_null = assert_definitive_provider_rejection(
+        client.place_order(&requests.place).await,
+        2,
+        "OrderRejected",
+    );
+    let absent = assert_definitive_provider_rejection(
+        client.place_order(&requests.place).await,
+        2,
+        "OrderRejected",
+    );
+    let count = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+
+    assert_eq!(count, 3);
+    for rejection in [explicit_null, absent] {
+        assert_eq!(rejection.order_id, None);
+        assert_eq!(rejection.untrusted_message(), None);
+    }
+}
+
+#[tokio::test]
+async fn rejection_message_never_reaches_display_or_debug_output() {
+    let (address, server) = start_server(vec![
+        (
+            200,
+            r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
+        ),
+        (
+            200,
+            r#"{"orderId":84,"success":false,"errorCode":2,"errorMessage":"synthetic-remote-text"}"#,
+        ),
+    ])
+    .await;
+    let client = client(address, 0);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
+
+    let result = client.place_order(&mutation_requests().place).await;
+    let count = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert_eq!(count, 2);
+    let Err(error) = result else {
+        panic!("a rejected placement must not succeed");
+    };
+
+    let rendered = [
+        error.to_string(),
+        format!("{error:?}"),
+        format!("{error:#?}"),
+    ];
+    for text in &rendered {
+        assert!(
+            !text.contains("synthetic-remote-text"),
+            "the remote message leaked into formatted output: {text}"
+        );
+    }
+    assert_eq!(
+        rendered[0],
+        "ProjectX rejected the operation (code: 2 OrderRejected)"
+    );
+    assert!(
+        rendered[1].contains("[REDACTED]"),
+        "Debug output must show that a message is present without its text: {}",
+        rendered[1]
+    );
+    let Error::Provider(rejection) = error else {
+        panic!("a documented placement rejection must stay definitive");
+    };
+    assert_eq!(rejection.untrusted_message(), Some("synthetic-remote-text"));
+}
+
+#[tokio::test]
+async fn pending_and_unknown_placements_stay_ambiguous_when_a_message_is_present() {
+    let (address, server) = start_server(vec![
+        (
+            200,
+            r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
+        ),
+        (
+            200,
+            r#"{"orderId":84,"success":false,"errorCode":6,"errorMessage":"synthetic-pending-text"}"#,
+        ),
+        (
+            200,
+            r#"{"success":false,"errorCode":7,"errorMessage":"synthetic-unknown-text"}"#,
+        ),
+    ])
+    .await;
+    let client = client(address, 0);
+    client
+        .authenticate()
+        .await
+        .unwrap_or_else(|error| panic!("fixture authentication must succeed: {error}"));
+    let requests = mutation_requests();
+
+    let pending = client.place_order(&requests.place).await;
+    let unknown = client.place_order(&requests.place).await;
+    let count = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert_eq!(count, 3);
+
+    for (result, code, name, message) in [
+        (pending, 6, "OrderPending", "synthetic-pending-text"),
+        (unknown, 7, "UnknownError", "synthetic-unknown-text"),
+    ] {
+        let Err(error) = result else {
+            panic!("placement code {code} must not succeed");
+        };
+        let rendered = format!("{error} {error:?}");
+        assert!(
+            !rendered.contains(message),
+            "the remote message leaked into formatted output: {rendered}"
+        );
+        assert_ambiguous_mutation::<()>(Err(error), "order placement", code, Some(name));
+    }
 }
 
 #[tokio::test]

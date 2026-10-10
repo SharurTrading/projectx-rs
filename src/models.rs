@@ -2036,16 +2036,29 @@ pub struct MarketTrade {
 #[non_exhaustive]
 pub struct OperationResponse;
 
+/// A decoded provider response envelope.
+///
+/// `T` is the endpoint body read from an accepted response. `R` is the
+/// endpoint-specific detail read from the remaining fields of a rejection;
+/// [`EmptyBody`] ignores them.
 #[derive(Debug)]
-pub(crate) enum Envelope<T> {
+pub(crate) enum Envelope<T, R = EmptyBody> {
     Accepted(T),
-    Rejected { error_code: i32 },
-    InconsistentStatus { success: bool, error_code: i32 },
+    Rejected {
+        error_code: i32,
+        error_message: Option<String>,
+        detail: R,
+    },
+    InconsistentStatus {
+        success: bool,
+        error_code: i32,
+    },
 }
 
-impl<'de, T> Deserialize<'de> for Envelope<T>
+impl<'de, T, R> Deserialize<'de> for Envelope<T, R>
 where
     T: serde::de::DeserializeOwned,
+    R: serde::de::DeserializeOwned,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -2062,7 +2075,7 @@ where
             .remove("errorCode")
             .ok_or_else(|| D::Error::custom("provider response error code is missing"))
             .and_then(|value| serde_json::from_str(value.get()).map_err(D::Error::custom))?;
-        object.remove("errorMessage");
+        let error_message = object.remove("errorMessage");
         if success != (error_code == 0) {
             return Ok(Self::InconsistentStatus {
                 success,
@@ -2070,21 +2083,39 @@ where
             });
         }
         if !success {
-            return Ok(Self::Rejected { error_code });
+            let error_message = error_message
+                .map(|value| serde_json::from_str::<Option<String>>(value.get()))
+                .transpose()
+                .map_err(D::Error::custom)?
+                .flatten();
+            let detail = decode_remaining(object).map_err(D::Error::custom)?;
+            return Ok(Self::Rejected {
+                error_code,
+                error_message,
+                detail,
+            });
         }
-        let mut body_json = String::from("{");
-        for (index, (key, value)) in object.into_iter().enumerate() {
-            if index > 0 {
-                body_json.push(',');
-            }
-            body_json.push_str(&serde_json::to_string(&key).map_err(D::Error::custom)?);
-            body_json.push(':');
-            body_json.push_str(value.get());
-        }
-        body_json.push('}');
-        let body = serde_json::from_str(&body_json).map_err(D::Error::custom)?;
+        let body = decode_remaining(object).map_err(D::Error::custom)?;
         Ok(Self::Accepted(body))
     }
+}
+
+/// Decodes the envelope fields left after the status fields were removed.
+fn decode_remaining<T>(object: BTreeMap<String, Box<RawValue>>) -> serde_json::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut body_json = String::from("{");
+    for (index, (key, value)) in object.into_iter().enumerate() {
+        if index > 0 {
+            body_json.push(',');
+        }
+        body_json.push_str(&serde_json::to_string(&key)?);
+        body_json.push(':');
+        body_json.push_str(value.get());
+    }
+    body_json.push('}');
+    serde_json::from_str(&body_json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2207,7 +2238,60 @@ mod tests {
             serde_json::from_str(r#"{"success":false,"errorCode":17,"errorMessage":"synthetic"}"#)
                 .unwrap_or_else(|error| panic!("rejection envelope must decode: {error}"));
 
-        assert!(matches!(envelope, Envelope::Rejected { error_code: 17 }));
+        assert!(matches!(
+            envelope,
+            Envelope::Rejected {
+                error_code: 17,
+                error_message: Some(ref message),
+                ..
+            } if message == "synthetic"
+        ));
+    }
+
+    #[test]
+    fn rejected_envelope_reads_a_null_or_absent_message_as_none() {
+        for json in [
+            r#"{"success":false,"errorCode":17,"errorMessage":null}"#,
+            r#"{"success":false,"errorCode":17}"#,
+        ] {
+            let envelope: Envelope<AccountsBody> = serde_json::from_str(json)
+                .unwrap_or_else(|error| panic!("rejection envelope must decode: {error}"));
+            assert!(matches!(
+                envelope,
+                Envelope::Rejected {
+                    error_code: 17,
+                    error_message: None,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejected_envelope_refuses_a_message_that_is_not_text() {
+        assert!(
+            serde_json::from_str::<Envelope<AccountsBody>>(
+                r#"{"success":false,"errorCode":17,"errorMessage":17}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_placement_envelope_reads_the_order_record() {
+        let envelope: Envelope<PlaceOrderBody, PlaceOrderBody> =
+            serde_json::from_str(r#"{"orderId":84,"success":false,"errorCode":2}"#)
+                .unwrap_or_else(|error| panic!("placement rejection must decode: {error}"));
+        let Envelope::Rejected { detail, .. } = envelope else {
+            panic!("placement rejection must stay a rejection");
+        };
+        assert_eq!(detail.order_id.map(OrderId::get), Some(84));
+        assert!(
+            serde_json::from_str::<Envelope<PlaceOrderBody, PlaceOrderBody>>(
+                r#"{"orderId":"not-an-id","success":false,"errorCode":2}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

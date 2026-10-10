@@ -9,8 +9,10 @@
 //! this module carries those tables so a rejection reaches the caller with the
 //! provider's own text instead of a bare number.
 //!
-//! The tables only carry the provider's published code names. Its free-form
-//! `errorMessage` is untrusted remote text and is never exposed or logged.
+//! The tables only carry the provider's published code names. A rejection's
+//! free-form `errorMessage` is untrusted remote text; it reaches the caller
+//! only through [`ProviderError::untrusted_message`](crate::ProviderError::untrusted_message)
+//! and is never logged by this crate.
 
 /// The provider's published error-code table for one REST response contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -8,6 +8,33 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [6.1.0] - 2026-10-10
+
+### Added
+
+- Carry the order ID and the provider's message on rejections under
+  [#74](https://github.com/SharurTrading/projectx-rs/issues/74), reported by the consuming
+  platform in [SharurMinus #65](https://github.com/SharurTrading/SharurMinus/issues/65).
+  `ProviderError` gains the public field `order_id: Option<OrderId>`, which
+  `Client::place_order` fills with the `orderId` the provider returns beside a definitive
+  rejection, and the accessor `ProviderError::untrusted_message() -> Option<&str>`, which
+  returns the provider's free-form `errorMessage` for every `Error::Provider` rejection, or
+  `None` when the provider sent `null` or omitted it. Both were previously discarded during
+  decoding, so a code `2` placement rejection could not say why it was refused or which
+  rejected record the provider created.
+
+### Changed
+
+- Reverse the policy that the provider's `errorMessage` is never exposed. The text remains
+  untrusted remote input, passed through unaltered and bounded only by the configured
+  response-size limit; callers clean it before displaying or logging it. It never appears in
+  an error's `Display` output, `ProviderError`'s `Debug` output shows only
+  `Some("[REDACTED]")` in its place, and the client never logs it. Ambiguous outcomes,
+  including placement codes `6` and `7`, are classified exactly as before and carry no
+  message. A rejection whose `errorMessage` is not text, or a placement rejection whose
+  `orderId` is not a valid order ID, is now a decode failure, which a mutation reports as
+  `Error::AmbiguousMutation`.
+
 ## [6.0.0] - 2026-09-30
 
 ### Breaking changes
@@ -298,6 +325,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[6.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...v5.0.1
 [5.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v4.0.0...v5.0.0
