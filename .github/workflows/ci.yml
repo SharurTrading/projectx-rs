@@ -117,7 +117,7 @@ jobs:
           # identical to main's. Validate a workflow-only change that alters
           # the build via `gh workflow run ci.yml` (workflow_dispatch) or on
           # the next main run.
-          rust_pat='\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rust-toolchain|clippy|deny)\.toml$|(^|/)\.cargo/audit\.toml$|^scripts/ci/'
+          rust_pat='^\.kache\.toml$|^\.github/actions/setup-kache/|\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)(rust-toolchain|clippy|deny)\.toml$|(^|/)\.cargo/audit\.toml$|^scripts/ci/'
           # NOTE: match via here-string, NOT `printf | grep -q`. Under
           # `set -o pipefail`, grep -q exits on the first match and closes the
           # pipe, flipping the whole condition to false on large diff lists.
@@ -152,7 +152,8 @@ jobs:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Set up Kache
+        uses: ./.github/actions/setup-kache
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
