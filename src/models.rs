@@ -1145,8 +1145,11 @@ pub enum RequestValidationError {
     /// An order modification contained no replacement values.
     #[error("order modification requires at least one replacement value")]
     EmptyModification,
-    /// A bracket distance was zero or negative.
-    #[error("bracket ticks must be positive")]
+    /// A bracket tick offset was zero.
+    ///
+    /// The name predates signed tick offsets and is retained for
+    /// compatibility: only zero is invalid, and the sign is the caller's.
+    #[error("bracket ticks must not be zero")]
     NonPositiveBracketTicks,
     /// An order request used an undocumented or unknown provider type code.
     #[error("unsupported order type code {code}")]
@@ -1194,10 +1197,18 @@ pub enum RequestValidationError {
 /// Placement accepts bracket legs only in the account's Auto OCO Brackets
 /// mode. Position Brackets mode rejects them with provider code `2`, even
 /// though the response can include an ID for the rejected order record.
+///
+/// The tick offset is signed: the provider applies its sign against the
+/// entry side and the protective leg. A long stop loss requires a negative
+/// count — the provider rejects the positive form with code `2`, "Ticks
+/// should be less than zero when longing" — and the provider reference does
+/// not enumerate the sign for every side and leg. This crate therefore
+/// neither infers nor rewrites the sign: the caller chooses it, and the
+/// nonzero value is preserved exactly through accessors and serialization.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bracket {
-    /// Distance in provider ticks.
+    /// Signed distance in provider ticks; the caller chooses the sign.
     ticks: i32,
     /// Bracket order type.
     #[serde(rename = "type")]
@@ -1205,21 +1216,21 @@ pub struct Bracket {
 }
 
 impl Bracket {
-    /// Creates a bracket leg with a positive distance in ticks.
+    /// Creates a bracket leg with a nonzero signed distance in ticks.
     ///
     /// # Errors
     ///
-    /// Returns an error when `ticks` is zero or negative, or when `order_type`
+    /// Returns an error when `ticks` is zero, or when `order_type`
     /// is not documented by the provider for bracket requests.
     pub fn new(ticks: i32, order_type: OrderType) -> Result<Self, RequestValidationError> {
-        if ticks <= 0 {
+        if ticks == 0 {
             return Err(RequestValidationError::NonPositiveBracketTicks);
         }
         validate_request_order_type(order_type)?;
         Ok(Self { ticks, order_type })
     }
 
-    /// Returns the distance in provider ticks.
+    /// Returns the signed distance in provider ticks.
     #[must_use]
     pub const fn ticks(&self) -> i32 {
         self.ticks
