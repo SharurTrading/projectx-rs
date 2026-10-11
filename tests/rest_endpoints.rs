@@ -169,15 +169,15 @@ async fn order_endpoints_use_typed_exact_requests() {
             .await
             .unwrap_or_else(|error| panic!("open-order search must succeed: {error}")),
     );
-    let stop_loss = Bracket::new(4, OrderType::Stop)
-        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
-    let place_request =
-        PlaceOrder::builder(account_id(), contract_id(), OrderType::Limit, Side::Bid, 1)
-            .limit_price(Decimal::new(10_025, 2))
-            .custom_tag("synthetic-order")
-            .stop_loss_bracket(stop_loss)
-            .build()
-            .unwrap_or_else(|error| panic!("fixture order must be valid: {error}"));
+    let place_request = signed_bracket_place_request();
+    assert_eq!(
+        place_request.stop_loss_bracket().map(Bracket::ticks),
+        Some(-400)
+    );
+    assert_eq!(
+        place_request.take_profit_bracket().map(Bracket::ticks),
+        Some(800)
+    );
     let placed = client
         .place_order(&place_request)
         .await
@@ -684,7 +684,7 @@ async fn order_query_mock(server: &MockServer) -> Mock<'_> {
 
 async fn place_order_mock(server: &MockServer) -> Mock<'_> {
     server
-        .mock_async(|when, then| {
+        .mock_async(move |when, then| {
             when.method(POST).path("/api/Order/place").json_body(json!({
                 "accountId": 42,
                 "contractId": "CON.F.US.MNQ.M26",
@@ -693,12 +693,29 @@ async fn place_order_mock(server: &MockServer) -> Mock<'_> {
                 "size": 1,
                 "limitPrice": 100.25,
                 "customTag": "synthetic-order",
-                "stopLossBracket": {"ticks": 4, "type": 4}
+                "stopLossBracket": {"ticks": -400, "type": 4},
+                "takeProfitBracket": {"ticks": 800, "type": 1}
             }));
             then.status(200)
                 .json_body(json!({"orderId": 84, "success": true, "errorCode": 0}));
         })
         .await
+}
+
+/// Long entry with the signed offsets the provider requires: a negative
+/// stop-loss count and a positive take-profit count.
+fn signed_bracket_place_request() -> PlaceOrder {
+    let stop_loss = Bracket::new(-400, OrderType::Stop)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
+    let take_profit = Bracket::new(800, OrderType::Limit)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error}"));
+    PlaceOrder::builder(account_id(), contract_id(), OrderType::Limit, Side::Bid, 1)
+        .limit_price(Decimal::new(10_025, 2))
+        .custom_tag("synthetic-order")
+        .stop_loss_bracket(stop_loss)
+        .take_profit_bracket(take_profit)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture order must be valid: {error}"))
 }
 
 fn order_json() -> serde_json::Value {

@@ -8,6 +8,31 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [6.1.1] - 2026-10-12
+
+### Fixed
+
+- Accept signed bracket tick offsets under
+  [#81](https://github.com/SharurTrading/projectx-rs/issues/81), reported by the consuming
+  platform in [SharurMinus #337](https://github.com/SharurTrading/SharurMinus/issues/337).
+  `Bracket::new` rejected every non-positive value with
+  `RequestValidationError::NonPositiveBracketTicks`, which made a native long stop-loss bracket
+  unconstructable: the provider requires stop-loss ticks below zero for a long entry and refuses
+  the positive form with code `2`, "Ticks should be less than zero when longing." The
+  constructor now accepts any nonzero signed `i32` offset and preserves the exact value through
+  accessors and serialization, including integer boundaries; only zero offsets and bracket order
+  types undocumented for requests remain rejected. The sign is the caller's choice for the entry
+  side and the protective leg — this crate neither infers nor rewrites it, and placement
+  ambiguity classification and the prohibition on automatic mutation retries are unchanged.
+
+### Changed
+
+- Dependency and CI updates: `jiff` 0.2.38 and `tokio` 1.53.2
+  ([#80](https://github.com/SharurTrading/projectx-rs/pull/80)), plus pinned CI action bumps for
+  `dtolnay/rust-toolchain` ([#79](https://github.com/SharurTrading/projectx-rs/pull/79)) and
+  `taiki-e/install-action` ([#78](https://github.com/SharurTrading/projectx-rs/pull/78)).
+  Lockfile and workflow pins only; no source change.
+
 ## [6.1.0] - 2026-10-10
 
 ### Added
@@ -325,6 +350,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[6.1.1]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...v6.0.0
 [5.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.0...v5.0.1

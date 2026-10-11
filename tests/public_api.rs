@@ -470,6 +470,45 @@ fn request_builders_reject_invalid_states() {
 }
 
 #[test]
+fn bracket_offsets_preserve_the_caller_chosen_sign() {
+    let account_id =
+        AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));
+    let contract_id = ContractId::new("CON.F.US.MNQ.M26")
+        .unwrap_or_else(|error| panic!("fixture contract must be valid: {error}"));
+
+    // The provider applies the sign against the entry side and protective
+    // leg, so both signs and both integer boundaries must survive untouched.
+    for ticks in [1, -1, 400, -400, i32::MAX, i32::MIN] {
+        let bracket = Bracket::new(ticks, OrderType::Stop)
+            .unwrap_or_else(|error| panic!("signed offset {ticks} must be valid: {error:?}"));
+        assert_eq!(bracket.ticks(), ticks);
+        let wire = serde_json::to_value(&bracket)
+            .unwrap_or_else(|error| panic!("bracket must serialize: {error}"));
+        assert_eq!(wire, json!({"ticks": ticks, "type": 4}));
+    }
+    let take_profit = Bracket::new(800, OrderType::Limit)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error:?}"));
+    let wire = serde_json::to_value(&take_profit)
+        .unwrap_or_else(|error| panic!("bracket must serialize: {error}"));
+    assert_eq!(wire, json!({"ticks": 800, "type": 1}));
+
+    let long_stop = Bracket::new(-400, OrderType::Stop)
+        .unwrap_or_else(|error| panic!("fixture bracket must be valid: {error:?}"));
+    let request = PlaceOrder::builder(account_id, contract_id, OrderType::Limit, Side::Bid, 1)
+        .limit_price(Decimal::new(10_025, 2))
+        .stop_loss_bracket(long_stop)
+        .take_profit_bracket(take_profit)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture placement must be valid: {error:?}"));
+    assert_eq!(request.stop_loss_bracket().map(Bracket::ticks), Some(-400));
+    assert_eq!(
+        request.stop_loss_bracket().map(Bracket::order_type),
+        Some(OrderType::Stop)
+    );
+    assert_eq!(request.take_profit_bracket().map(Bracket::ticks), Some(800));
+}
+
+#[test]
 fn only_trailing_stop_placements_require_a_trail_price() {
     let account_id =
         AccountId::new(42).unwrap_or_else(|error| panic!("fixture account must be valid: {error}"));

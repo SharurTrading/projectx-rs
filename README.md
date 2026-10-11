@@ -168,6 +168,14 @@ and validates tick alignment and quote availability. Placement rejects distances
 modification has no such limit. See the [placement][order-place] and [modification][order-modify]
 references. The builders preserve exact decimal inputs and leave quote-dependent checks to the server.
 
+Bracket tick offsets are signed. The provider applies the sign against the entry side and the
+protective leg: a long stop loss needs negative ticks, and the provider rejects the wrong sign with
+placement code `2` — for example, "Invalid stop loss ticks (400). Ticks should be less than zero
+when longing." `Bracket::new` therefore accepts any nonzero signed `i32` offset and preserves the
+exact value through its accessors and serialization, including integer boundaries; only zero and
+bracket order types undocumented for requests are rejected locally. The sign is the caller's choice
+for the entry side and the protective leg — this crate neither infers nor rewrites it.
+
 Attaching either bracket leg requires Auto OCO Brackets in the account's platform risk settings.
 Position Brackets mode produces placement code `2` (`OrderRejected`) and can still return an ID for
 the rejected record; the client correctly returns `Error::Provider`, and `ProviderError::order_id`
