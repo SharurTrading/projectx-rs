@@ -6,7 +6,10 @@
 use std::{collections::VecDeque, fmt, time::Duration};
 
 use parking_lot::Mutex;
-use tokio::time::{Instant, sleep};
+use tokio::{
+    sync::Notify,
+    time::{Instant, sleep},
+};
 
 use crate::Error;
 
@@ -106,13 +109,44 @@ impl RateLimit {
 pub struct RateLimitConfig {
     history: RateLimit,
     general: RateLimit,
+    exit_reserve: usize,
 }
 
 impl RateLimitConfig {
     /// Creates configuration from dedicated history and general limits.
     #[must_use]
     pub const fn new(history: RateLimit, general: RateLimit) -> Self {
-        Self { history, general }
+        Self {
+            history,
+            general,
+            exit_reserve: 0,
+        }
+    }
+
+    /// Reserves general-window capacity for cancellation and position closes.
+    ///
+    /// Ordinary requests are admitted only below `general.max_requests() -
+    /// reserve`; exits may use the full general limit. Both classes count
+    /// against the same rolling window and provider cooldown. The default is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when `reserve` is not smaller than
+    /// the general request limit, which must retain ordinary capacity.
+    pub fn with_exit_reserve(mut self, reserve: usize) -> Result<Self, Error> {
+        if reserve >= self.general.max_requests {
+            return Err(Error::Configuration(
+                "exit reserve must be smaller than the general request limit".to_owned(),
+            ));
+        }
+        self.exit_reserve = reserve;
+        Ok(self)
+    }
+
+    /// Returns the general-window capacity reserved for cancellation and closes.
+    #[must_use]
+    pub const fn exit_reserve(self) -> usize {
+        self.exit_reserve
     }
 
     /// Returns the history endpoint limit.
@@ -140,6 +174,7 @@ impl Default for RateLimitConfig {
         Self {
             history: RateLimit::trusted(DEFAULT_HISTORY_REQUESTS, DEFAULT_HISTORY_WINDOW),
             general: RateLimit::trusted(DEFAULT_GENERAL_REQUESTS, DEFAULT_GENERAL_WINDOW),
+            exit_reserve: 0,
         }
     }
 }
@@ -152,8 +187,8 @@ pub(crate) struct RateLimits {
 
 impl RateLimits {
     pub(crate) fn new(config: Option<RateLimitConfig>) -> Self {
-        let history = config.map(|limits| WindowLimiter::new(limits.history));
-        let general = config.map(|limits| WindowLimiter::new(limits.general));
+        let history = config.map(|limits| WindowLimiter::new(limits.history, 0));
+        let general = config.map(|limits| WindowLimiter::new(limits.general, limits.exit_reserve));
         Self {
             config,
             history,
@@ -161,8 +196,32 @@ impl RateLimits {
         }
     }
 
-    pub(crate) const fn config(&self) -> Option<RateLimitConfig> {
-        self.config
+    pub(crate) fn config(&self) -> Option<RateLimitConfig> {
+        self.config.map(|mut config| {
+            if let Some(limiter) = &self.general {
+                config.exit_reserve = limiter.state.lock().exit_reserve;
+            }
+            config
+        })
+    }
+
+    pub(crate) fn set_exit_reserve(&self, reserve: usize) -> Result<(), Error> {
+        let limiter = self.general.as_ref().ok_or_else(|| {
+            Error::Configuration("exit reserve requires enabled rate limits".to_owned())
+        })?;
+        let mut state = limiter.state.lock();
+        if reserve >= limiter.limit.max_requests {
+            return Err(Error::Configuration(
+                "exit reserve must be smaller than the general request limit".to_owned(),
+            ));
+        }
+        let changed = state.exit_reserve != reserve;
+        state.exit_reserve = reserve;
+        drop(state);
+        if changed {
+            limiter.policy_changed.notify_waiters();
+        }
+        Ok(())
     }
 
     pub(crate) fn limit(&self, kind: RateLimitKind) -> RateLimit {
@@ -174,21 +233,35 @@ impl RateLimits {
             return;
         };
         loop {
-            match limiter.try_acquire(Instant::now()) {
+            let changed = limiter.policy_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match limiter.try_acquire(false) {
                 Ok(()) => return,
-                Err(retry_after) => sleep(retry_after).await,
+                Err(retry_after) => {
+                    tokio::select! {
+                        () = &mut changed => {},
+                        () = sleep(retry_after) => {},
+                    }
+                }
             }
         }
     }
 
     pub(crate) fn try_acquire(&self, kind: RateLimitKind) -> Result<(), Duration> {
         self.limiter(kind)
-            .map_or(Ok(()), |limiter| limiter.try_acquire(Instant::now()))
+            .map_or(Ok(()), |limiter| limiter.try_acquire(false))
+    }
+
+    pub(crate) fn try_acquire_exit(&self) -> Result<(), Duration> {
+        self.general
+            .as_ref()
+            .map_or(Ok(()), |limiter| limiter.try_acquire(true))
     }
 
     pub(crate) fn cool_down(&self, kind: RateLimitKind, retry_after: Duration) {
         if let Some(limiter) = self.limiter(kind) {
-            limiter.cool_down(Instant::now(), retry_after);
+            limiter.cool_down(retry_after);
         }
     }
 
@@ -202,23 +275,32 @@ impl RateLimits {
 
 struct WindowLimiter {
     limit: RateLimit,
+    policy_changed: Notify,
     state: Mutex<WindowState>,
 }
 
 impl WindowLimiter {
-    fn new(limit: RateLimit) -> Self {
+    fn new(limit: RateLimit, exit_reserve: usize) -> Self {
         Self {
             limit,
+            policy_changed: Notify::new(),
             state: Mutex::new(WindowState::with_capacity(
                 limit.max_requests.min(MAX_INITIAL_CAPACITY),
+                exit_reserve,
             )),
         }
     }
 
-    fn try_acquire(&self, now: Instant) -> Result<(), Duration> {
+    fn try_acquire(&self, exit: bool) -> Result<(), Duration> {
         let mut state = self.state.lock();
+        let capacity = if exit {
+            self.limit.max_requests
+        } else {
+            self.limit.max_requests - state.exit_reserve
+        };
+        let now = Instant::now();
         state.expire(now, self.limit.window);
-        let retry_after = state.retry_after(now, self.limit);
+        let retry_after = state.retry_after(now, self.limit.window, capacity);
         if retry_after.is_zero() {
             state.admitted.push_back(now);
             Ok(())
@@ -227,9 +309,9 @@ impl WindowLimiter {
         }
     }
 
-    fn cool_down(&self, now: Instant, retry_after: Duration) {
-        let deadline = saturating_deadline(now, retry_after.min(MAX_COOLDOWN));
+    fn cool_down(&self, retry_after: Duration) {
         let mut state = self.state.lock();
+        let deadline = saturating_deadline(Instant::now(), retry_after.min(MAX_COOLDOWN));
         if state
             .cooldown_until
             .is_none_or(|current| deadline > current)
@@ -240,13 +322,15 @@ impl WindowLimiter {
 }
 
 struct WindowState {
+    exit_reserve: usize,
     admitted: VecDeque<Instant>,
     cooldown_until: Option<Instant>,
 }
 
 impl WindowState {
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(capacity: usize, exit_reserve: usize) -> Self {
         Self {
+            exit_reserve,
             admitted: VecDeque::with_capacity(capacity),
             cooldown_until: None,
         }
@@ -265,22 +349,24 @@ impl WindowState {
         }
     }
 
-    fn retry_after(&self, now: Instant, limit: RateLimit) -> Duration {
+    fn retry_after(&self, now: Instant, window: Duration, capacity: usize) -> Duration {
         let cooldown = self.cooldown_until.map_or(Duration::ZERO, |deadline| {
             deadline.saturating_duration_since(now)
         });
-        let capacity = if self.admitted.len() < limit.max_requests {
+        let capacity_delay = if self.admitted.len() < capacity {
             Duration::ZERO
         } else {
-            self.admitted.front().map_or(limit.window, |oldest| {
-                oldest
-                    .checked_add(limit.window)
-                    .map_or(limit.window, |deadline| {
-                        deadline.saturating_duration_since(now)
-                    })
-            })
+            // Exits may fill beyond ordinary capacity; admission requires
+            // enough aggregate entries to expire, not only the oldest one.
+            self.admitted
+                .get(self.admitted.len() - capacity)
+                .map_or(window, |admitted| {
+                    admitted
+                        .checked_add(window)
+                        .map_or(window, |deadline| deadline.saturating_duration_since(now))
+                })
         };
-        cooldown.max(capacity)
+        cooldown.max(capacity_delay)
     }
 }
 
@@ -498,5 +584,270 @@ mod tests {
     fn public_rate_limit_rejects_zero_values() {
         assert!(RateLimit::new(0, Duration::from_secs(1)).is_err());
         assert!(RateLimit::new(1, Duration::ZERO).is_err());
+    }
+
+    fn reserved_limits() -> Arc<RateLimits> {
+        let config = RateLimitConfig::new(
+            RateLimit::new(5, Duration::from_secs(10)).unwrap_or_else(|error| panic!("{error}")),
+            RateLimit::new(5, Duration::from_secs(10)).unwrap_or_else(|error| panic!("{error}")),
+        )
+        .with_exit_reserve(2)
+        .unwrap_or_else(|error| panic!("{error}"));
+        Arc::new(RateLimits::new(Some(config)))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_reserve_keeps_ordinary_waiters_below_the_shared_aggregate_cap() {
+        let limits = reserved_limits();
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        }
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(10))
+        );
+        let waiting_limits = Arc::clone(&limits);
+        let waiter = tokio::spawn(async move {
+            waiting_limits.wait(RateLimitKind::General).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(10)));
+        waiter.abort();
+        assert!(waiter.await.is_err_and(|error| error.is_cancelled()));
+        advance(Duration::from_secs(10)).await;
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        }
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(10))
+        );
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ordinary_retry_after_waits_for_enough_aggregate_entries_to_expire() {
+        let limits = reserved_limits();
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(6)));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(8))
+        );
+        advance(Duration::from_secs(6)).await;
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(2))
+        );
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(1))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_exit_admission_never_exceeds_shared_capacity() {
+        let limits = reserved_limits();
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..20 {
+            let clone = Arc::clone(&limits);
+            tasks.spawn(async move { clone.try_acquire_exit() });
+        }
+        let mut accepted = 0;
+        let mut refused = 0;
+        while let Some(result) = tasks.join_next().await {
+            match result.unwrap_or_else(|error| panic!("{error}")) {
+                Ok(()) => accepted += 1,
+                Err(delay) => {
+                    assert_eq!(delay, Duration::from_secs(10));
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(accepted, 2);
+        assert_eq!(refused, 18);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_cooldown_blocks_ordinary_and_reserved_capacity() {
+        let limits = reserved_limits();
+        limits.cool_down(RateLimitKind::General, Duration::from_secs(15));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(15)));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(15))
+        );
+        advance(Duration::from_secs(14)).await;
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(1)));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(1))
+        );
+        advance(Duration::from_secs(1)).await;
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+    }
+
+    #[test]
+    fn exit_reserve_retains_ordinary_capacity_and_defaults_to_zero() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.exit_reserve(), 0);
+        assert_eq!(
+            RateLimitConfig::new(config.history(), config.general()).exit_reserve(),
+            0
+        );
+        assert_eq!(
+            config
+                .with_exit_reserve(199)
+                .unwrap_or_else(|error| panic!("{error}"))
+                .exit_reserve(),
+            199
+        );
+        assert!(matches!(
+            config.with_exit_reserve(200),
+            Err(Error::Configuration(_))
+        ));
+        assert!(matches!(
+            config.with_exit_reserve(usize::MAX),
+            Err(Error::Configuration(_))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_release_wakes_all_registered_waiters_without_advancing_time() {
+        let limits = reserved_limits();
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        }
+        let first = limits.wait(RateLimitKind::General);
+        let second = limits.wait(RateLimitKind::General);
+        tokio::pin!(first, second);
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        let started = Instant::now();
+        let clone = Arc::clone(&limits);
+        clone
+            .set_exit_reserve(0)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(futures_util::poll!(first.as_mut()).is_ready());
+        assert!(futures_util::poll!(second.as_mut()).is_ready());
+        assert_eq!(Instant::now(), started);
+        assert_eq!(limits.config().map(RateLimitConfig::exit_reserve), Some(0));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(10)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_growth_rechecks_waiters_and_preserves_spent_capacity() {
+        let limits = reserved_limits();
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        }
+        let read = limits.wait(RateLimitKind::General);
+        tokio::pin!(read);
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        limits
+            .set_exit_reserve(0)
+            .unwrap_or_else(|error| panic!("{error}"));
+        limits
+            .set_exit_reserve(4)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        assert_eq!(limits.config().map(RateLimitConfig::exit_reserve), Some(4));
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(10))
+        );
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(10)));
+        limits
+            .set_exit_reserve(0)
+            .unwrap_or_else(|error| panic!("{error}"));
+        limits
+            .set_exit_reserve(4)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(10)));
+        limits
+            .set_exit_reserve(0)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        advance(Duration::from_secs(10)).await;
+        assert!(futures_util::poll!(read.as_mut()).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_changes_preserve_timestamps_cooldown_and_invalid_policy_state() {
+        let limits = reserved_limits();
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        advance(Duration::from_secs(2)).await;
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        limits.cool_down(RateLimitKind::General, Duration::from_secs(3));
+        for reserve in [4, 0, 2] {
+            limits
+                .set_exit_reserve(reserve)
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(3)));
+        }
+        for reserve in [5, usize::MAX] {
+            assert!(matches!(
+                limits.set_exit_reserve(reserve),
+                Err(Error::Configuration(_))
+            ));
+            assert_eq!(limits.config().map(RateLimitConfig::exit_reserve), Some(2));
+            assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(3)));
+        }
+        advance(Duration::from_secs(3)).await;
+        for _ in 0..3 {
+            assert_eq!(limits.try_acquire_exit(), Ok(()));
+        }
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(5)));
+        advance(Duration::from_secs(5)).await;
+        assert_eq!(limits.try_acquire_exit(), Ok(()));
+        assert_eq!(limits.try_acquire_exit(), Err(Duration::from_secs(2)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_waiter_rechecks_each_replacement_including_release_then_growth() {
+        let limits = reserved_limits();
+        limits
+            .set_exit_reserve(4)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(limits.try_acquire(RateLimitKind::General), Ok(()));
+        let read = limits.wait(RateLimitKind::General);
+        tokio::pin!(read);
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        limits
+            .set_exit_reserve(0)
+            .unwrap_or_else(|error| panic!("{error}"));
+        limits
+            .set_exit_reserve(4)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        limits
+            .set_exit_reserve(3)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(futures_util::poll!(read.as_mut()).is_ready());
+        assert_eq!(
+            limits.try_acquire(RateLimitKind::General),
+            Err(Duration::from_secs(10))
+        );
     }
 }

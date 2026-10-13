@@ -191,6 +191,22 @@ impl ValidationTracker {
 }
 
 impl Client {
+    /// Replaces the shared general-window reserve for cancellation and closes.
+    ///
+    /// Zero releases the reserve. All clones observe the latest replacement;
+    /// waiting queries reconsider it immediately. One caller coordinator should
+    /// own this policy. Changes preserve admitted attempts and provider cooldowns,
+    /// and do not guarantee exit capacity after the aggregate budget is spent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] if rate limits are disabled or `reserve`
+    /// is not smaller than the general request limit. Invalid changes preserve
+    /// the current policy and all admission state.
+    pub fn set_exit_reserve(&self, reserve: usize) -> Result<(), Error> {
+        self.rate_limits.set_exit_reserve(reserve)
+    }
+
     /// Starts configuring a client with explicit API-key credentials.
     pub fn builder(credentials: Credentials) -> ClientBuilder {
         ClientBuilder::new(AuthenticationCredentials::ApiKey(credentials))
@@ -699,7 +715,7 @@ impl Client {
     pub async fn place_order(&self, request: &PlaceOrder) -> Result<OrderResponse, Error> {
         let kind = MutationKind::OrderPlacement;
         let response: Envelope<PlaceOrderBody, PlaceOrderBody> = self
-            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
+            .post_authenticated_no_retry(kind, request)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
         let body =
@@ -864,7 +880,7 @@ impl Client {
         T: Serialize + ?Sized,
     {
         let response: Envelope<EmptyBody> = self
-            .post_authenticated_no_retry(RateLimitKind::General, kind.path(), request)
+            .post_authenticated_no_retry(kind, request)
             .await
             .map_err(|error| ambiguous_mutation(kind, error))?;
         accepted(response, kind.error_code_table())
@@ -945,8 +961,7 @@ impl Client {
 
     async fn post_authenticated_no_retry<T, R>(
         &self,
-        kind: RateLimitKind,
-        path: &str,
+        mutation: MutationKind,
         body: &T,
     ) -> Result<R, Error>
     where
@@ -955,10 +970,17 @@ impl Client {
     {
         let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
         self.require_authentication()?;
-        self.rate_limits
-            .try_acquire(kind)
-            .map_err(|retry_after| Error::LocallyRateLimited { kind, retry_after })?;
-        self.post_authenticated_once(kind, path, &encoded)
+        let kind = RateLimitKind::General;
+        match mutation {
+            MutationKind::OrderCancellation
+            | MutationKind::PositionClose
+            | MutationKind::PartialPositionClose => self.rate_limits.try_acquire_exit(),
+            MutationKind::OrderPlacement | MutationKind::OrderModification => {
+                self.rate_limits.try_acquire(kind)
+            }
+        }
+        .map_err(|retry_after| Error::LocallyRateLimited { kind, retry_after })?;
+        self.post_authenticated_once(kind, mutation.path(), &encoded)
             .await
             .map(|(response, _basis)| response)
     }

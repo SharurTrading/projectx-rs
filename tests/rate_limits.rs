@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use httpmock::prelude::*;
 use projectx_client::{
-    AccountId, AmbiguityOrigin, BarUnit, Client, ContractId, Credentials, Endpoints, Error,
-    HistoryRequest, OrderType, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side,
-    Timestamp,
+    AccountId, AmbiguityOrigin, BarUnit, CancelOrder, Client, CloseContract, ContractId,
+    Credentials, Endpoints, Error, HistoryRequest, ModifyOrder, OrderId, OrderType,
+    PartialCloseContract, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side, Timestamp,
+    TradeQuery,
 };
 use serde_json::json;
 
@@ -322,4 +323,299 @@ async fn session_validator_shutdown_cancels_a_rate_limit_wait() {
     login.assert_calls_async(1).await;
     accounts.assert_calls_async(1).await;
     validation.assert_calls_async(0).await;
+}
+
+fn reserve_config() -> RateLimitConfig {
+    limits(5, Duration::from_mins(1))
+        .with_exit_reserve(2)
+        .unwrap_or_else(|error| panic!("fixture reserve must be valid: {error}"))
+}
+
+fn cancel_request() -> CancelOrder {
+    CancelOrder {
+        account_id: AccountId::new(42).unwrap_or_else(|error| panic!("{error}")),
+        order_id: OrderId::new(84).unwrap_or_else(|error| panic!("{error}")),
+    }
+}
+
+fn close_request() -> CloseContract {
+    CloseContract {
+        account_id: AccountId::new(42).unwrap_or_else(|error| panic!("{error}")),
+        contract_id: ContractId::new("CON.F.US.MNQ.M26").unwrap_or_else(|error| panic!("{error}")),
+    }
+}
+
+#[tokio::test]
+async fn queued_trade_queries_cannot_consume_cancel_and_close_reserve() {
+    let server = MockServer::start_async().await;
+    let trades = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Trade/search");
+            then.status(200)
+                .json_body(json!({"trades": [], "success": true, "errorCode": 0}));
+        })
+        .await;
+    let cancel = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/cancel");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let close = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/closeContract");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let place = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/place");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0, "orderId": 84}));
+        })
+        .await;
+    let modify = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/modify");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let validation = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/validate");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    let query = TradeQuery::builder(close_request().account_id)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    for _ in 0..3 {
+        assert!(client.query_trades(&query).await.is_ok());
+    }
+    let shared_client = client.clone();
+    let mut waiting = Box::pin(shared_client.query_trades(&query));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let modification = ModifyOrder::builder(cancel_request().account_id, cancel_request().order_id)
+        .size(1)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(matches!(
+        client.place_order(&place_order()).await,
+        Err(Error::LocallyRateLimited {
+            kind: RateLimitKind::General,
+            ..
+        })
+    ));
+    assert!(matches!(
+        client.modify_order(&modification).await,
+        Err(Error::LocallyRateLimited {
+            kind: RateLimitKind::General,
+            ..
+        })
+    ));
+    let mut validating = Box::pin(shared_client.validate_session());
+    assert!(futures_util::poll!(&mut validating).is_pending());
+    assert!(matches!(
+        client.logout().await,
+        Err(Error::LocallyRateLimited {
+            kind: RateLimitKind::General,
+            ..
+        })
+    ));
+    assert!(client.cancel_order(&cancel_request()).await.is_ok());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert!(client.close_contract(&close_request()).await.is_ok());
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert!(
+        matches!(shared_client.cancel_order(&cancel_request()).await, Err(Error::LocallyRateLimited { kind: RateLimitKind::General, retry_after }) if !retry_after.is_zero() && retry_after <= Duration::from_mins(1))
+    );
+    trades.assert_calls_async(3).await;
+    cancel.assert_calls_async(1).await;
+    close.assert_calls_async(1).await;
+    place.assert_calls_async(0).await;
+    modify.assert_calls_async(0).await;
+    validation.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn concurrent_clones_share_two_reserved_partial_close_attempts() {
+    let server = MockServer::start_async().await;
+    let accounts = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Account/search");
+            then.status(200)
+                .json_body(json!({"accounts": [], "success": true, "errorCode": 0}));
+        })
+        .await;
+    let partial = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/partialCloseContract");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    for _ in 0..3 {
+        assert!(client.search_active_accounts().await.is_ok());
+    }
+    let close = close_request();
+    let request = PartialCloseContract::new(close.account_id, close.contract_id, 1)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let clones: Vec<_> = (0..20).map(|_| client.clone()).collect();
+    let results = futures_util::future::join_all(
+        clones
+            .iter()
+            .map(|client| client.partial_close_contract(&request)),
+    )
+    .await;
+    let mut accepted = 0;
+    let mut refused = 0;
+    for result in results {
+        match result {
+            Ok(_) => accepted += 1,
+            Err(Error::LocallyRateLimited {
+                kind: RateLimitKind::General,
+                retry_after,
+            }) => {
+                assert!(!retry_after.is_zero());
+                refused += 1;
+            }
+            Err(error) => panic!("unexpected exit outcome: {error}"),
+        }
+    }
+    assert_eq!(accepted, 2);
+    assert_eq!(refused, 18);
+    accounts.assert_calls_async(3).await;
+    partial.assert_calls_async(2).await;
+}
+
+#[tokio::test]
+async fn provider_cooldown_refuses_reserved_exits_without_sending() {
+    let server = MockServer::start_async().await;
+    let query = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Account/search");
+            then.status(429).header("Retry-After", "60");
+        })
+        .await;
+    let close = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/closeContract");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 0);
+    authenticate(&client, &server).await;
+    assert!(
+        matches!(client.search_active_accounts().await, Err(Error::ProviderRateLimited { kind: RateLimitKind::General, retry_after }) if retry_after == Duration::from_mins(1))
+    );
+    assert!(
+        matches!(client.clone().close_contract(&close_request()).await, Err(Error::LocallyRateLimited { kind: RateLimitKind::General, retry_after }) if !retry_after.is_zero())
+    );
+    query.assert_calls_async(1).await;
+    close.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn reserved_exit_server_errors_are_ambiguous_single_attempts() {
+    let server = MockServer::start_async().await;
+    let cancel = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/cancel");
+            then.status(500);
+        })
+        .await;
+    let close = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/closeContract");
+            then.status(500);
+        })
+        .await;
+    let partial = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/partialCloseContract");
+            then.status(500);
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    let closing = close_request();
+    let partial_request =
+        PartialCloseContract::new(closing.account_id, closing.contract_id.clone(), 1)
+            .unwrap_or_else(|error| panic!("{error}"));
+    for (result, expected_operation) in [
+        (
+            client.cancel_order(&cancel_request()).await,
+            "order cancellation",
+        ),
+        (client.close_contract(&closing).await, "position close"),
+        (
+            client.partial_close_contract(&partial_request).await,
+            "partial position close",
+        ),
+    ] {
+        assert!(
+            matches!(result, Err(Error::AmbiguousMutation { operation, origin: Some(AmbiguityOrigin::HttpStatus(500)), .. }) if operation == expected_operation)
+        );
+    }
+    cancel.assert_calls_async(1).await;
+    close.assert_calls_async(1).await;
+    partial.assert_calls_async(1).await;
+}
+
+#[test]
+fn runtime_reserve_is_shared_in_debug_and_disabled_clients_refuse_changes() {
+    let credentials =
+        Credentials::new("fixture-user", "fixture-key").unwrap_or_else(|error| panic!("{error}"));
+    let client = Client::builder(credentials)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let clone = client.clone();
+    client
+        .set_exit_reserve(20)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(format!("{clone:?}").contains("exit_reserve: 20"));
+    clone
+        .set_exit_reserve(30)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(format!("{client:?}").contains("exit_reserve: 30"));
+    assert!(matches!(
+        clone.set_exit_reserve(200),
+        Err(Error::Configuration(_))
+    ));
+    assert!(format!("{client:?}").contains("exit_reserve: 30"));
+    client
+        .set_exit_reserve(0)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(format!("{clone:?}").contains("exit_reserve: 0"));
+    let credentials =
+        Credentials::new("fixture-user", "fixture-key").unwrap_or_else(|error| panic!("{error}"));
+    let independent = Client::builder(credentials)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    independent
+        .set_exit_reserve(10)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(format!("{client:?}").contains("exit_reserve: 0"));
+    let credentials =
+        Credentials::new("fixture-user", "fixture-key").unwrap_or_else(|error| panic!("{error}"));
+    let disabled = Client::builder(credentials)
+        .disable_rate_limits()
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    for reserve in [0, 20, usize::MAX] {
+        assert!(matches!(
+            disabled.set_exit_reserve(reserve),
+            Err(Error::Configuration(_))
+        ));
+        assert!(format!("{disabled:?}").contains("rate_limits: None"));
+    }
 }

@@ -550,8 +550,60 @@ delta-seconds and HTTP-date forms of `Retry-After`, applies the longer of that d
 backoff, and publishes the cooldown to every clone. Missing or malformed `Retry-After` falls back to
 the configured rolling-window duration; hostile delays are capped at 24 hours.
 
+### Optional exit reserve
+
+The outer wrapper opts in and sizes the reserve for its workload with
+`RateLimitConfig::with_exit_reserve(R)` for the initial policy and
+`Client::set_exit_reserve(R)` to replace it at runtime. Zero releases the reserve.
+The default is zero, and `R` must be smaller than the
+general request limit `G`. Reserve units are requests in the general rolling window; the
+independent history budget is unchanged.
+
+| Operation | Admission |
+| --- | --- |
+| `cancel_order`, `close_contract`, `partial_close_contract` | Aggregate count below `G`; can consume reserved capacity |
+| Other authenticated general requests, including reads, placement, modification, logout and session validation | Aggregate count below `G - R` |
+| Both classes | One rolling window and provider cooldown, shared by the client and every clone |
+
+A wrapper can apply its selected reserve when constructing the shared client:
+
+```rust
+use projectx_client::{Client, Credentials, Error, RateLimitConfig};
+
+fn configured_client(credentials: Credentials, reserve_requests: usize) -> Result<Client, Error> {
+    let limits = RateLimitConfig::default().with_exit_reserve(reserve_requests)?;
+    Client::builder(credentials).rate_limits(limits).build()
+}
+
+fn update_reserve(client: &Client) -> Result<(), Error> {
+    let reads = client.clone();
+    reads.set_exit_reserve(40)?;
+    client.set_exit_reserve(0)?;
+    Ok(())
+}
+```
+
+The configuration and runtime changes are exercised by the credential-free
+[configuration example](examples/exit_reserve.rs): `cargo run --example exit_reserve`.
+The example's number is illustrative, not a sizing recommendation. Share clones for reads and
+exits. One outer coordinator owns this shared policy: serialized updates replace the previous
+value, with the last update winning; they are not additive leases or promised permits. Every
+admission attempt reads the current policy. A change wakes waiting reads
+so they can reconsider capacity immediately. Changes never refund requests, reset timestamps,
+clear cooldowns or revoke admitted attempts. Raising the reserve after the aggregate budget is
+spent creates no new exit capacity; releasing it restores ordinary access only to unspent capacity. Once exits consume capacity, ordinary reads wait for enough aggregate attempts to expire
+to fall below their cap; ordinary mutations refuse immediately when capacity is unavailable.
+
+> [!IMPORTANT]
+> This is finite shared capacity, not an exclusive or unlimited Flatten allowance. It does not
+> increase the provider limit, bypass cooldown, queue an exit or retry one. The reserve is
+> available only to the listed endpoints. Trading state, reserve sizing, account selection and
+> recovery belong to the outer wrapper; the SDK does not track positions or infer which order
+> requests reduce exposure.
+
 Custom gateways can replace the defaults with `ClientBuilder::rate_limits`. Call
-`disable_rate_limits()` only when an external coordinator enforces the limits. The built-in state
+`disable_rate_limits()` only when an external coordinator enforces the limits. Changing a disabled limiter returns `Error::Configuration`, including a zero release.
+The built-in state
 cannot coordinate independently constructed clients or separate processes using the same
 credentials; those deployments still require a shared external limiter.
 

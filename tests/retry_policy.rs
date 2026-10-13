@@ -1758,3 +1758,97 @@ async fn unrepresentable_validation_period_is_rejected_before_authentication() {
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
 }
+
+#[tokio::test]
+async fn reserved_exit_timeouts_remain_ambiguous_and_send_each_request_once() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let cancellation = CancellationToken::new();
+    let server_cancel = cancellation.clone();
+    let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let (login, request) = accept_request(&listener).await;
+        assert!(request.starts_with("POST /api/Auth/loginKey "));
+        respond(
+            login,
+            200,
+            r#"{"success":true,"errorCode":0,"token":"synthetic-token"}"#,
+        )
+        .await;
+        let mut held_connections = Vec::new();
+        let mut paths = Vec::new();
+        loop {
+            let accepted = tokio::select! {
+                () = server_cancel.cancelled() => break,
+                accepted = accept_request(&listener) => accepted,
+            };
+            let (stream, request) = accepted;
+            paths.push(request.lines().next().unwrap_or_default().to_owned());
+            held_connections.push(stream);
+            seen_tx
+                .send(())
+                .unwrap_or_else(|error| panic!("fixture request must be observed: {error}"));
+        }
+        paths
+    });
+    let credentials = Credentials::new("synthetic-user", "synthetic-key")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let endpoint = format!("http://{address}");
+    let endpoints =
+        Endpoints::custom(&endpoint, &endpoint).unwrap_or_else(|error| panic!("{error}"));
+    let config = projectx_client::RateLimitConfig::default()
+        .with_exit_reserve(2)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let client = Client::builder(credentials)
+        .endpoints(endpoints)
+        .rate_limits(config)
+        .timeout(Duration::from_secs(10))
+        .max_retries(3)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(client.authenticate().await.is_ok());
+    for operation in [
+        "order cancellation",
+        "position close",
+        "partial position close",
+    ] {
+        let clone = client.clone();
+        let requests = mutation_requests();
+        let exit = tokio::spawn(async move {
+            match operation {
+                "order cancellation" => clone.cancel_order(&requests.cancel).await,
+                "position close" => clone.close_contract(&requests.close).await,
+                "partial position close" => {
+                    clone.partial_close_contract(&requests.partial_close).await
+                }
+                _ => panic!("fixture operation must be an exit"),
+            }
+        });
+        assert_eq!(seen_rx.recv().await, Some(()));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let result = exit
+            .await
+            .unwrap_or_else(|error| panic!("exit task must join: {error}"));
+        tokio::time::resume();
+        assert!(
+            matches!(result, Err(Error::AmbiguousMutation { operation: actual, origin: Some(AmbiguityOrigin::TransportTimeout), .. }) if actual == operation)
+        );
+    }
+    cancellation.cancel();
+    let paths = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
+    assert_eq!(
+        paths,
+        [
+            "POST /api/Order/cancel HTTP/1.1",
+            "POST /api/Position/closeContract HTTP/1.1",
+            "POST /api/Position/partialCloseContract HTTP/1.1",
+        ]
+    );
+}
