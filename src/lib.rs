@@ -50,11 +50,17 @@ mod realtime;
 mod timestamp;
 mod token;
 
+/// Authenticated REST client, its builder, and its session-validation guard.
 pub use client::{Client, ClientBuilder, SessionValidator};
+/// REST and real-time endpoints for one `ProjectX` deployment.
 pub use config::Endpoints;
+/// API-key and authorized-application credentials and their builder.
 pub use credentials::{ApplicationCredentials, ApplicationCredentialsBuilder, Credentials};
+/// Client errors, provider rejections, and ambiguous-mutation origins.
 pub use error::{AmbiguityOrigin, Error, ProviderError};
+/// Validated provider account, contract, order, position, symbol, and trade identifiers.
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
+/// Provider-native request, response, order, position, trade, and market-data models.
 pub use models::{
     Account, Bar, BarUnit, Bracket, CancelOrder, CloseContract, Contract, DepthType,
     HistoryRequest, HistoryRequestBuilder, MarketDepth, MarketQuote, MarketTrade, ModifyOrder,
@@ -64,10 +70,14 @@ pub use models::{
     RequestValidationError, SearchContracts, Side, Trade, TradeLogType, TradeQuery,
     TradeQueryBuilder, TradeSearch,
 };
+/// Rolling-window REST rate-limit kinds, limits, and configuration.
 pub use rate_limit::{RateLimit, RateLimitConfig, RateLimitKind};
+/// Real-time hubs, client, session, events, messages, and invocation decoding.
 pub use realtime::{
     Hub, RealtimeClient, RealtimeError, RealtimeEvent, RealtimeEventReceiver, RealtimeGeneration,
     RealtimeMessage, RealtimeSession, SignalRInvocation,
 };
+/// Decimal type used for provider prices, money, balances, fees, and P&L.
 pub use rust_decimal::Decimal;
+/// Validated provider timestamps, civil dates, and their parse errors.
 pub use timestamp::{ProviderDate, ProviderDateError, Timestamp, TimestampError};
