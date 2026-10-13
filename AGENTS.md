@@ -233,6 +233,10 @@ Every crates.io or GitHub release must originate from a reviewed pull request an
 commit on `main`. Direct pushes to protected branches, force-pushes, publishing from a dirty or
 unmerged worktree, and moving or replacing a published version tag are prohibited.
 
+Follow the step-by-step procedure in [RELEASING.md](RELEASING.md) for choosing a version, preparing
+the release pull request, and publishing after merge. This section is the normative gate; if the
+guide and this section ever disagree, this section wins.
+
 Before merging a release pull request:
 
 1. Confirm provider terms permit the intended source distribution and branding.
