@@ -1,0 +1,444 @@
+<!--
+SPDX-FileCopyrightText: 2026 Kevin Monaghan
+SPDX-License-Identifier: MIT-0
+-->
+
+# ProjectX behaviour guide
+
+> What the ProjectX Gateway actually does when you use it through this
+> client, written down so you do not have to find it out again.
+
+## Who this is for
+
+You are wrapping `projectx-client` inside a trading application: you keep an
+account view, place and close orders, and must stay correct when the network
+drops. The [README](../README.md) explains what the client guarantees. This
+guide explains how the venue behaves around it: in what order rows arrive,
+what each timestamp means, and where the gaps are.
+
+Every fact carries one of these labels:
+
+| Label | Meaning |
+| --- | --- |
+| Documented | Stated in the provider's published API docs or spec |
+| Observed | Seen in live use, mostly in recorded practice sessions |
+| Client | How this crate behaves, from its source |
+| Reported | Told to us by an operator; not captured in a recording |
+| Unverified | Plausible, but not proven either way |
+
+The recorded sessions ran on simulated practice accounts in October 2026,
+trading one or two micro index futures at a time. An observed fact shows
+that something can happen. It does not promise that it always happens.
+
+## Connection
+
+### Login and tokens
+
+- Client: `authenticate()` logs in with a user name and API key.
+  Authorized applications use `Client::application_builder`.
+- Client: one token is shared by every clone of a `Client` and by the
+  hubs it creates. Each hub connect and reconnect takes the latest token.
+- Client: use `authenticate_with_validation` for long sessions. It
+  renews the token in the background.
+- Client: after HTTP 401 the token is unusable. The client does not log in
+  again for you.
+
+### One REST budget for almost everything
+
+Documented, and enforced by the client:
+
+| Requests | Budget |
+| --- | --- |
+| Bar history | 50 per 30 seconds |
+| Every other authenticated call | 200 per 60 seconds |
+
+The second budget is shared by reads, order placement, cancels, closes,
+logout and session validation, on every clone of the client. Login and ping
+are not counted.
+
+Client: reads wait their turn. Money-moving calls never wait. When the
+window is full, they fail at once with `Error::LocallyRateLimited`, and
+nothing was sent.
+
+> [!WARNING]
+> A busy read loop can use the whole budget. A close or cancel sent next is
+> then refused locally, at exactly the moment you need it. Reads queue;
+> exits do not.
+
+### Reserving room for exits
+
+Client: `RateLimitConfig::with_exit_reserve(n)` and
+`Client::set_exit_reserve(n)` hold back `n` of the 200 requests. Only
+`cancel_order`, `close_contract` and `partial_close_contract` may use them.
+Everything else stops at `200 - n`.
+
+What worked for us:
+
+- Start with the reserve already set, before the first read.
+- Size it from what you might have to undo: one request per working order
+  to cancel, plus one per account and contract with a position to close.
+- While anything is unknown (startup, a hub drop, an unanswered order),
+  hold the full reserve. We used a cap of 50, which leaves 150 for
+  ordinary work.
+- Release it only when every account is known to be flat with no orders.
+
+> [!IMPORTANT]
+> The reserve shares the one rolling window. Raising it cannot recover
+> requests already spent, and it does not bypass a provider 429 cooldown.
+> Separate `Client` instances and separate processes do not share a
+> budget, even with the same login.
+
+### Two hubs
+
+Documented: there are two SignalR hubs. The market hub carries quotes,
+trades and depth. The user hub carries account, order, position and trade
+rows for the accounts you subscribe.
+
+- Client: when a socket fails, the client reconnects about every five
+  seconds for as long as you have asked it to stay connected.
+- Client: it keeps no subscriptions. After `RealtimeEvent::Reconnected`,
+  send every subscription again.
+- Observed: rows missed while a hub was down are not replayed. In one
+  session both hubs were cut while a position was closed. The closing trade
+  never arrived on the stream; a later REST trade search had it.
+- Observed: after a reconnect, the trade that opened a lot can be pushed
+  again when the lot closes (see [Fills](#fills-fees-and-pnl)).
+
+Treat `Disconnected` and `TransportGap` as "my view may be stale". Read
+orders, positions and trades over REST before you trust the account again.
+
+### When the venue ends your session
+
+- Observed: opening a second full session (REST and hubs) for the same user
+  made the venue push `GatewayLogout` to the first session's user hub about
+  two seconds later.
+  Its message begins "Multiple sessions detected".
+- Observed: after that notice, the first session's REST reads still worked,
+  its market hub still delivered, and orders were still accepted for at
+  least 70 seconds.
+- Observed: two REST logins of the same user ran side by side for 90
+  seconds without either being logged out.
+- Unverified: how long the venue keeps serving after `GatewayLogout`.
+
+Our advice: treat the notice as final. Keep watching, allow only cancels
+and closes, and ask a person to reconnect.
+
+### Ambiguous outcomes
+
+Client: a mutation that may have reached the venue, but whose answer is
+unclear, returns `Error::AmbiguousMutation`. Timeouts, HTTP 429 after
+sending, and "pending" or "unknown" codes all count. The client never
+retries it. Read venue state before you decide what to do.
+
+## Data
+
+### Contracts
+
+- Documented: contract ids look like `CON.F.US.MNQ.Z26`: product root, month
+  code, two-digit year.
+- Observed: some roots differ from the exchange's own. Examples: `EP` is
+  `ES`, `ENQ` is `NQ`, `GCE` is `GC`, `EU6` is `6E`. Keep a mapping table.
+- Documented: `activeContract` marks the front month on each row. Nothing
+  promises exactly one active row per product.
+- Documented: contract search returns at most 20 rows.
+- Observed: `contract_by_id` also finds months no longer in the available
+  list.
+- Observed: for pricing, a contract row gives only tick size and tick value.
+- Observed: every account row said `simulated: true`, evaluation accounts
+  included. You cannot tell practice from evaluation by that flag.
+
+### Bars and history
+
+- Documented: one reply holds at most 20,000 bars. Treat a full reply as
+  possibly cut short; we keep each request just under that many intervals.
+- Observed: a bar is stamped with the instant its window opens. A
+  one-minute bar stamped 22:00:00Z holds 22:00 to 22:01.
+- Observed: bars longer than one hour start at the session open, not on
+  clock hours. Build those from one-hour bars or smaller.
+- Observed: daily, weekly and monthly bars start at a session open, such as
+  the Sunday evening open for CME Globex products.
+- Client: `include_partial_bar(true)` adds the forming bar.
+- Observed: the forming bar's values can include trades after the end you
+  asked for.
+- Unverified: `BarUnit::Tick`. We used aggregated bars only.
+
+### Trade history
+
+- Client: `search_trades` needs a start time; the end is optional.
+  `query_trades` can leave out both, which asks for every trade available.
+- Documented: there is no paging, count or cursor. Retention is not stated.
+- Observed: in one sample the reply listed the newest trade first. Sort by
+  time and id yourself.
+- Observed: a trade list read just before a position read missed a trade
+  that the position already included. Reading the trades again found it.
+
+### Live market data
+
+- Client: market rows arrive in batches. Read the contract from the frame
+  (`invocation.contract_id()`) and decode with `decode_batch`. The rows
+  inside name the product symbol, not the month.
+- Documented: trade prints carry no trade id, so you cannot de-duplicate
+  them by id. The print's type gives the aggressor side.
+- Client: quotes are sparse updates. A missing field means "not in this
+  update", never zero. Merge them per contract.
+- Documented: quotes carry best bid and ask prices but no sizes.
+- Documented: depth rows give a price level's resting size. Zero means the
+  level is gone. A reset row clears the book. There is no stated level
+  count and no opening snapshot. After a reconnect, clear your book and
+  rebuild it.
+
+### Timestamps
+
+No row carries a sequence number. Use ids to match rows, not times.
+
+| Row | Field | What it means |
+| --- | --- | --- |
+| Trade | `creationTimestamp` | When it executed |
+| Order | `creationTimestamp` | When the order was created |
+| Order | `updateTimestamp` | The order's latest change |
+| Position | `creationTimestamp` | When the position opened |
+| Account | none | Balance rows have no time |
+| REST reply | none | Order answers have no venue time |
+
+> [!IMPORTANT]
+> A position row's `creationTimestamp` is its opening instant. Observed:
+> it stays the same on every later row, including the flat row, and in one
+> reversal it stayed the same while the side flipped. It cannot tell you
+> how fresh the row is, or order it against trades.
+
+Observed: precision varies by channel.
+
+- Hub rows have seven decimal places (100 ns).
+- REST trade search cuts times to the microsecond, so a trade's REST time
+  can be slightly earlier than its hub time. We saw 400 ns and 900 ns.
+- A restated trade (action 1) can carry the coarser time too.
+
+Compare times by value, and never require REST and hub times to be equal.
+Prices also come with varying trailing zeros; compare decimals by value.
+
+## Execution
+
+### Order types
+
+| Code | Type | Notes |
+| --- | --- | --- |
+| 1 | Limit | Observed |
+| 2 | Market | Observed |
+| 3 | Stop-limit | Decoded only; see below |
+| 4 | Stop (stop-market) | Observed |
+| 5 | Trailing stop | Documented; not observed |
+| 6 | Join bid | Documented; not observed |
+| 7 | Join ask | Documented; not observed |
+
+- Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
+  and `Bracket::new` refuse it, because the placement docs do not list it
+  as a request value.
+- Documented: the OpenAPI spec lists type 3. Unverified: whether the venue
+  accepts it.
+- Client: a trailing stop is placed with an absolute price. Order searches
+  report a distance in `trail_price`. Do not copy one into the other (see
+  the README).
+- Unverified: join orders are placed without a price and rest at the best
+  bid or ask. We have no recording of one.
+- Client: there is no time-in-force field. Every order is good till
+  cancelled.
+- Documented: modify changes only size and prices. It cannot change type,
+  side, contract or duration.
+
+### The order lifecycle on the user hub
+
+Observed:
+
+- User-hub rows come wrapped with an `action` field beside the row data.
+- Order rows are always action 1.
+- A market order goes `Pending` then `Filled`, with no `Open` row.
+- A resting limit or stop shows `Open`.
+- A modify is pushed as a new `Open` row with the new size and prices. The
+  REST answer carries no terms.
+- A cancel is pushed as a `Cancelled` row, usually before the REST answer.
+- The placement answer can come before or after the hub rows; usually after.
+- A hub `Rejected` row has no message. Only the REST refusal carries the
+  venue's words. The REST answer has no venue time, so you cannot order the
+  two by time.
+- `customTag` must be unique per account. Orders placed elsewhere, and the
+  orders behind `close_contract` and `partial_close_contract`, have none.
+- Trades carry no tag. Match a trade to its order by `orderId`.
+
+### What arrives first
+
+Observed, on the user hub:
+
+- The order row, trade, position row and balance usually arrive in that
+  order, within a few milliseconds.
+- In a fast burst, a position row and its trade came before any order row
+  naming the order. The placement answer came last.
+- A position row can lead its trade. The worst lead we saw was 0.46 ms.
+- Position rows mostly trail their trade, by 0.3 to 11 ms in a burst.
+- A balance can be pushed before the trade it includes.
+- A balance can repeat an older figure after a newer trade. The right
+  figure followed about 1.3 ms later.
+- The same balance is often pushed twice.
+
+```mermaid
+sequenceDiagram
+    participant H as user hub
+    participant A as your account view
+    H-->>A: position row (long 1)
+    H-->>A: trade (orderId names an unknown order)
+    H-->>A: balance
+    H-->>A: order rows Pending, Filled
+    Note over A: REST placement answer arrives last
+```
+
+Our advice: hold a fill you cannot match until its order row arrives. Hold
+a position row that your fills have not reached yet. Wait a few seconds of
+quiet before calling any difference a mismatch; we wait 5 seconds.
+
+### Fills, fees and PnL
+
+Observed:
+
+- A trade with action 0 is a new fill. Action 1 restates an older trade:
+  the trade that opened a lot is pushed again when the lot closes, even in
+  a session that never saw it. Never book action 1 as a fill.
+- Also de-duplicate by trade id, scoped by account.
+- `fees` and `commissions` are separate fields. The balance is charged
+  both, so add them.
+- `profitAndLoss` is set on a trade that closes a position and empty on
+  one that opens it.
+- One order can fill as several trades at one price: a reversal as a
+  closing trade with PnL and an opening trade without; a two-lot exit as one
+  trade per lot. They can arrive in any order, within about half a
+  millisecond.
+- Documented: trades carry a `voided` flag. Observed: no trade was ever
+  voided in our sessions.
+
+### Positions
+
+Observed:
+
+- `size` is a quantity, not a signed number. `type` 1 is long and 2 is
+  short.
+- A held position is action 1. Going flat pushes action 2 with size 0 and
+  type 0. That flat row still carries an `averagePrice`; ignore it.
+- A reversal (long 1, sell 2) produced one position row, short 1, after
+  both trades. The row kept its id and opening time.
+- After a first-in-first-out partial exit, `averagePrice` is the remaining
+  lot's own entry price.
+- A new position after flat gets a new position id.
+
+### Closing positions
+
+- Client: `close_contract` closes the whole position; `partial_close_contract`
+  closes a given size. Both use the exit reserve.
+- Observed: each close is carried out as a market order without a tag.
+- Observed: `close_contract` leaves working orders working, resting exits
+  included. Cancel them yourself.
+- Observed: `close_contract` on a flat contract answers code 2
+  (`PositionNotFound`) and pushes nothing.
+- Observed: a partial close answers success with no order id. Match the
+  reduction by account, contract and time.
+
+A flatten that worked for us: cancel every working order, including
+suspended bracket children, then close every position. Send each group at
+once.
+
+### Refusals we have seen
+
+| Request | Answer |
+| --- | --- |
+| Modify a filled order | Code 3, "Order not found" |
+| Cancel an unknown order id | Code 2, no message |
+| Cancel a filled order | Code 5 (ambiguous) |
+| Place with a reused `customTag` | Code 2, "custom tag ... unique" |
+| Place with size 0 | Code 2, "Invalid order size" |
+| Place an off-tick limit | Code 2, but an order is created |
+| Long bracket with a positive stop | Code 2, but an order is created |
+
+The off-tick refusal also creates an order that the hub reports as
+`Rejected`. Its id never means a working order.
+
+Code 5 on a cancel is `UnknownError`. The client reports it as
+`AmbiguousMutation`, so read the order before deciding.
+
+### Brackets
+
+- Documented: attaching stop or target legs requires the account's Auto
+  OCO Brackets setting. In Position Brackets mode the order is refused with
+  code 2, yet a rejected order is created with an id. No endpoint tells you
+  the mode; ask the account owner.
+- Documented: one stop leg and one target leg at most, each given in ticks.
+  Legs have no size field and no price field.
+- Observed: ticks are signed against the entry. A long's stop is negative
+  and its target positive; a short is the reverse.
+- Observed: legs wait as `Suspended` orders, with no prices, until the
+  parent fills. Then they are measured from the fill price.
+- Documented: `search_open_orders` leaves out suspended orders. Use
+  `query_orders` with `Open`, `Pending`, `PendingCancellation` and
+  `Suspended`, and read every page.
+- Observed: hub rows for legs carry `parentOrderId`, and some carry
+  `linkedOrderId`.
+- Observed: a one-tick edit to an active stop leg was accepted in both
+  directions.
+- Observed: cancelling an unfilled parent cancelled its legs. A later cancel
+  of a leg answered code 5.
+- Observed: with the client disconnected, a target filled and the venue
+  cancelled the sibling stop. Brackets run at the venue.
+- Unverified: what legs do when the parent fills only in part.
+
+### Copier follower accounts
+
+- Documented: cancellation works only for simulated accounts that are not
+  copy-trading followers. Others get code 6 (`AccountRejected`).
+- Reported: accounts that follow a venue-hosted copier reject direct
+  orders and flatten requests.
+- Client: the account row has no field that marks a follower.
+
+Our advice: let the user declare follower accounts. Keep watching them,
+send them no orders, and leave them out of your exit reserve. Their reads
+still use the shared REST budget.
+
+## Wrapping the SDK
+
+A short checklist from what we learned:
+
+1. Build one `Client` per login and share its clones. Separate clients do
+   not share the rate budget.
+2. Set the exit reserve before the first request. Keep it full while
+   anything is unknown.
+3. Never retry a mutation on your own. On `AmbiguousMutation`, read first.
+4. Scope every venue id (order, trade, position) by account.
+5. Accept rows in any order: hold unmatched fills and early positions.
+6. Ignore trades with action 1, and de-duplicate trades by id.
+7. Add `fees` and `commissions` together for the full charge.
+8. Use `query_orders` with suspended orders included, never
+   `search_open_orders` alone.
+9. After any `Disconnected`, `Reconnected` or `TransportGap`, subscribe
+   again and read orders, positions and trades over REST.
+10. Read trades, then positions, then trades again. If the two trade lists
+    differ, read again. Separate REST calls are not one snapshot.
+11. Treat `ProviderList::Absent` as "unknown", never as "empty".
+12. If an order row has terms you cannot use (an unknown type, a leg with no
+    price), keep its id so you can still cancel it. Keep the rest of the
+    snapshot.
+13. Treat `GatewayLogout` as the end of the session.
+
+## Known gaps
+
+These are limits of the venue or of our evidence, not promises.
+
+| Gap | Status |
+| --- | --- |
+| Sequence number or resume point on hub rows | None exists |
+| Atomic snapshot across accounts, orders, positions | Not offered |
+| Trade search paging, retention, completeness | Not stated |
+| Ids unique across accounts | Not stated |
+| Margin on the user hub; a daily PnL figure | Not offered |
+| Rate limit for hub invocations | Not published |
+| Live samples of types 3, 5, 6 and 7 | Not observed |
+| A resting order filled in parts over time | Not seen |
+| A voided trade | Not seen |
+| Bracket legs on a partly filled parent | Not stated |
+| Service after `GatewayLogout` | Not stated |
+| Copier follower rejection | Reported, not observed |
+| History with `BarUnit::Tick` | Not tested |
