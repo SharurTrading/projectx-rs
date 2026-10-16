@@ -33,3 +33,22 @@ gitleaks git --no-banner --redact --log-opts="--all" .
 Never add live credentials, captured account data, private-platform dependencies, or generated
 provider tokens. Tests must be deterministic and use synthetic fixtures unless they are explicitly
 ignored read-only live probes.
+
+## Local build cache
+
+Kache is optional and speeds up only local builds of this repository. Crates that
+depend on this one never use it, and CI does not use it (it caches with
+`Swatinem/rust-cache`). To opt in, install it and run its one-time setup, which
+covers every repository on the machine:
+
+```sh
+cargo install kache --locked
+kache init
+kache doctor
+```
+
+[.kache.toml](.kache.toml) keeps the cache local-only, with no remote backends or
+planner, and isolates this repository's entries under its own key salt;
+`kache doctor` lists it as the config file. The
+[Kache quick start](https://ninja.kunobi.com/docs/kache/getting-started/quick-start)
+covers the rest.
