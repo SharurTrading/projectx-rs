@@ -113,6 +113,10 @@ rows for the accounts you subscribe.
 - Observed: rows missed while a hub was down are not replayed. In one
   session both hubs were cut while a position was closed. The closing trade
   never arrived on the stream; a later REST trade search had it.
+- Observed: a close sent while both hubs were down still answered success
+  over REST. After the hubs reconnected, the close's order, fill and flat
+  position row were never pushed. A later `close_contract` on the now-flat
+  contract answered code 2 (`PositionNotFound`).
 - Observed: after a reconnect, the trade that opened a lot can be pushed
   again when the lot closes (see [Fills](#fills-fees-and-pnl)).
 
@@ -321,7 +325,8 @@ Observed:
   a session that never saw it. Never book action 1 as a fill.
 - Also de-duplicate by trade id, scoped by account.
 - `fees` and `commissions` are separate fields. The balance is charged
-  both, so add them.
+  both, so add them. A two-contract MNQ fill stated `fees` 0.72 and
+  `commissions` 0.50: 1.22 in all.
 - `profitAndLoss` is set on a trade that closes a position and empty on
   one that opens it.
 - One order can fill as several trades at one price: a reversal as a
@@ -342,7 +347,8 @@ Observed:
 - A reversal (long 1, sell 2) produced one position row, short 1, after
   both trades. The row kept its id and opening time.
 - After a first-in-first-out partial exit, `averagePrice` is the remaining
-  lot's own entry price.
+  lot's own entry price. When a partial close left one of two lots bought
+  together, it stayed at the entry price.
 - A new position after flat gets a new position id.
 
 ### Closing positions
@@ -351,9 +357,10 @@ Observed:
   closes a given size. Both use the exit reserve.
 - Observed: each close is carried out as a market order without a tag.
 - Observed: `close_contract` leaves working orders working, resting exits
-  included. Cancel them yourself.
+  and bracket legs included (see [Brackets](#brackets)). Cancel them
+  yourself.
 - Observed: `close_contract` on a flat contract answers code 2
-  (`PositionNotFound`) and pushes nothing.
+  (`PositionNotFound`) with a null message and pushes nothing.
 - Observed: a close and a partial close each answer success with no order
   id. Match the close order by account, contract and time.
 - Observed: the close's untagged order row, its fill and the flat or reduced
@@ -416,6 +423,11 @@ Code 5 on a cancel is `UnknownError`. The client reports it as
   of a leg answered code 5.
 - Observed: with the client disconnected, a target filled and the venue
   cancelled the sibling stop. Brackets run at the venue.
+- Observed: an Auto OCO entry that filled kept its target and stop `Open`
+  after `close_contract` closed the position. Both legs stayed working on
+  every order read for about 11 seconds, until the caller cancelled them.
+  The venue does not end a bracket's legs when its position goes flat
+  another way. Cancel them yourself.
 - Unverified: what legs do when the parent fills only in part.
 
 ### Copier follower accounts
@@ -445,15 +457,19 @@ A short checklist from what we learned:
 7. Add `fees` and `commissions` together for the full charge.
 8. Use `query_orders` with suspended orders included, never
    `search_open_orders` alone.
-9. After any `Disconnected`, `Reconnected` or `TransportGap`, subscribe
-   again and read orders, positions and trades over REST.
-10. Read trades, then positions, then trades again. If the two trade lists
+9. When a bracketed position goes flat any way but its own legs, read the
+   orders and cancel the legs still working. The venue does not end them.
+10. After any `Disconnected`, `Reconnected` or `TransportGap`, subscribe
+    again and read orders, positions and trades over REST. Missed rows are
+    never replayed: a close that REST answered during the gap can leave no
+    trace on the stream.
+11. Read trades, then positions, then trades again. If the two trade lists
     differ, read again. Separate REST calls are not one snapshot.
-11. Treat `ProviderList::Absent` as "unknown", never as "empty".
-12. If an order row has terms you cannot use (an unknown type, a leg with no
+12. Treat `ProviderList::Absent` as "unknown", never as "empty".
+13. If an order row has terms you cannot use (an unknown type, a leg with no
     price), keep its id so you can still cancel it. Keep the rest of the
     snapshot.
-13. Treat `GatewayLogout` as the end of the session.
+14. Treat `GatewayLogout` as the end of the session.
 
 ## Known gaps
 
