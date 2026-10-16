@@ -10,6 +10,11 @@ SPDX-License-Identifier: MIT-0
 [![docs.rs](https://img.shields.io/docsrs/projectx-client/6.1.1?v=6.1.1)](https://docs.rs/projectx-client/6.1.1/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
+> [!IMPORTANT]
+> Read the [behaviour guide](docs/behaviour-guide.md) before wrapping this client. It records
+> how the ProjectX Gateway behaves in practice: row order, timestamp meanings and the gaps a
+> wrapper must handle.
+
 An async, provider-native Rust client for the ProjectX Gateway API.
 
 This project is available under the [MIT No Attribution License (MIT-0)](LICENSE). It is an
@@ -20,7 +25,6 @@ API subscription where required.
 Use the official [ProjectX Gateway API documentation](https://gateway.docs.projectx.com/) as the
 reference for provider endpoints, request fields, response payloads, and subscription requirements.
 This README documents the additional safety and lifecycle behavior supplied by this client.
-The [behaviour guide](docs/behaviour-guide.md) describes how the venue behaves in practice.
 
 The minimum supported Rust version is 1.95.0.
 
