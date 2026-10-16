@@ -442,7 +442,7 @@ The client makes overload and ambiguous execution visible instead of hiding it:
 | HTTP response body | Streamed under a configurable byte limit; oversized bodies are rejected. |
 | HTTP redirects | Not followed automatically, keeping one admitted attempt equal to one outbound request. |
 | Dependency HTTP retries | Disabled; only the client-owned query loop retries, with fresh rate-limit admission per attempt. |
-| Safe REST queries | Wait for local rate-limit capacity; transient failures use configurable bounded exponential backoff. The two [exit reads](#optional-exit-reserve) never wait and are sent once. |
+| Safe REST queries | Wait for local rate-limit capacity; transient failures use configurable bounded exponential backoff. The two [exit reads](#optional-exit-reserve) never wait and are sent at most once. |
 | Session validation | Revision-fenced and cancellation-safe; ambiguous post-admission outcomes invalidate that exact session and require authentication. |
 | Order and position mutations | Never retried automatically because a timeout can have an ambiguous outcome. |
 | SignalR outbound queue | Bounded; a full queue returns `SendQueueFull` rather than growing without limit. |
@@ -555,7 +555,7 @@ For query responses, HTTP 429 becomes `Error::ProviderRateLimited`. The client a
 delta-seconds and HTTP-date forms of `Retry-After`, applies the longer of that delay and exponential
 backoff, and publishes the cooldown to every clone. The two
 [exit reads](#optional-exit-reserve) publish the cooldown too but return the 429 at once, without
-backoff or retry, as they do a transport failure or a server error. Missing or malformed `Retry-After` falls back to
+backoff or retry; they return a transport failure or a server error at once as well. Missing or malformed `Retry-After` falls back to
 the configured rolling-window duration; hostile delays are capped at 24 hours.
 
 ### Optional exit reserve
