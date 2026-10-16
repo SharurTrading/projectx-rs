@@ -30,7 +30,12 @@ first public release.
   exit that must read what to cancel and close. Each is sent at most once and never waits: an
   exhausted budget or a provider cooldown is `Error::LocallyRateLimited` without sending, and an
   HTTP 429 is `Error::ProviderRateLimited`, since a read is never ambiguous
-  ([#93](https://github.com/SharurTrading/projectx-rs/pull/93)).
+  ([#93](https://github.com/SharurTrading/projectx-rs/pull/93)). Follow-up
+  [#95](https://github.com/SharurTrading/projectx-rs/pull/95) corrects their documentation —
+  each order-query page is its own admitted exit request, the reserve needs one request for the
+  position search plus one per order page for each account an exit must read, and the general
+  statements that reads wait, queue or retry exclude the two exit reads — and pins the cooldown
+  and 429 refusals in tests.
 
 ### Changed
 
