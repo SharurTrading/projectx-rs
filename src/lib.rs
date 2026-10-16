@@ -9,8 +9,9 @@
 //! their own boundary.
 //!
 //! Authenticated REST requests use shared rolling-window admission control.
-//! Safe queries wait asynchronously for capacity, while mutations return
-//! [`Error::LocallyRateLimited`] before sending when the local budget is full.
+//! Safe queries wait asynchronously for capacity, while mutations and the two
+//! exit reads return [`Error::LocallyRateLimited`] before sending when the
+//! local budget is full.
 //!
 //! Successful list reads return [`ProviderList`] so an explicit provider
 //! array, including an authoritative empty one, stays distinguishable from a

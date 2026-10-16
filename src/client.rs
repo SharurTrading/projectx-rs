@@ -44,8 +44,10 @@ const USER_AGENT: &str = concat!("projectx-client/", env!("CARGO_PKG_VERSION"));
 /// The client uses the caller's Tokio runtime and keeps its bearer token
 /// private. Call [`Client::authenticate`] before calling authenticated methods.
 /// Safe authenticated queries wait asynchronously for shared rate-limit
-/// capacity before their HTTP timeout begins. Money-moving mutations instead
-/// return [`Error::LocallyRateLimited`] without sending when capacity is full.
+/// capacity before their HTTP timeout begins. Money-moving mutations and the
+/// exit reads ([`Client::search_open_positions_for_exit`],
+/// [`Client::query_orders_for_exit`]) instead return
+/// [`Error::LocallyRateLimited`] without sending when capacity is full.
 pub struct Client {
     credentials: Arc<AuthenticationCredentials>,
     endpoints: Endpoints,
@@ -1397,7 +1399,7 @@ impl ClientBuilder {
 
     /// Sets the number of retries for read/query requests.
     ///
-    /// Money-moving mutations are never retried.
+    /// Money-moving mutations and the two exit reads are never retried.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self

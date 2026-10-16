@@ -87,7 +87,8 @@ What worked for us:
 
 - Start with the reserve already set, before the first read.
 - Size it from what you might have to undo: one request per working order
-  to cancel, plus one per account and contract with a position to close.
+  to cancel, plus one per account and contract with a position to close,
+  plus the exit reads for any account you must read first.
 - While anything is unknown (startup, a hub drop, an unanswered order),
   hold the full reserve. We used a cap of 50, which leaves 150 for
   ordinary work.
