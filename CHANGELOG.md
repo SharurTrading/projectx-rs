@@ -8,6 +8,17 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Fixed
+
+- Name the two exit reads where the crate's documentation still stated the general rule: the
+  crate docs, the `Client` docs, and `ClientBuilder::max_retries` now say
+  `search_open_positions_for_exit` and `query_orders_for_exit` refuse locally without sending
+  and are never retried, matching the README and the behaviour guide, whose reserve-sizing tip
+  now also counts the exit reads. Recovered unmerged follow-up to
+  [#95](https://github.com/SharurTrading/projectx-rs/pull/95). Documentation only.
+
 ## [6.2.0] - 2026-10-16
 
 ### Added
