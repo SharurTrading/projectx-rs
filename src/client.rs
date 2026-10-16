@@ -705,6 +705,12 @@ impl Client {
     /// [`OrderStatus::Suspended`](crate::OrderStatus::Suspended) included, to
     /// find a bracket's inactive children.
     ///
+    /// Each call is one page and one exit request, admitted or refused on its
+    /// own. Page through as [`Self::query_orders`] describes: continue through
+    /// every listed page until a short, empty or
+    /// [`ProviderList::Absent`](crate::ProviderList::Absent) page ends it. Size
+    /// the exit reserve for every page an exit may read.
+    ///
     /// # Errors
     ///
     /// As [`Self::search_open_positions_for_exit`].

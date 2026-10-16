@@ -689,7 +689,7 @@ async fn exit_reads_go_out_at_once_under_full_ordinary_pressure() {
 }
 
 #[tokio::test]
-async fn exit_reads_spend_the_exit_reserve_and_not_the_ordinary_budget() {
+async fn exit_reads_can_spend_the_reserve_a_later_close_needs() {
     let server = MockServer::start_async().await;
     let gateway = exit_reads(&server).await;
     let client = fixture_client(&server, reserve_config(), 3);
@@ -771,6 +771,74 @@ async fn a_provider_429_on_an_exit_read_is_a_plain_refusal_sent_once() {
         matches!(refused, Err(Error::ProviderRateLimited { kind: RateLimitKind::General, retry_after }) if retry_after == Duration::from_mins(1))
     );
     positions.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn a_provider_429_on_the_exit_order_query_is_a_plain_refusal_sent_once() {
+    let server = MockServer::start_async().await;
+    let orders = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/v2/query");
+            then.status(429).header("Retry-After", "60");
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+
+    let refused = tokio::time::timeout(PROMPT, client.query_orders_for_exit(&nonterminal_query()))
+        .await
+        .unwrap_or_else(|_| panic!("a refused exit order query must not wait to retry"));
+
+    assert!(
+        matches!(refused, Err(Error::ProviderRateLimited { kind: RateLimitKind::General, retry_after }) if retry_after == Duration::from_mins(1))
+    );
+    orders.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn a_provider_cooldown_refuses_both_exit_reads_without_sending() {
+    let server = MockServer::start_async().await;
+    let positions = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/searchOpen");
+            then.status(429).header("Retry-After", "60");
+        })
+        .await;
+    let orders = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/v2/query");
+            then.status(200).json_body(json!({
+                "orders": [], "totalCount": 0, "success": true, "errorCode": 0,
+            }));
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    let cooled = tokio::time::timeout(
+        PROMPT,
+        client.search_open_positions_for_exit(close_request().account_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("a refused exit position search must not wait to retry"));
+    assert!(matches!(cooled, Err(Error::ProviderRateLimited { .. })));
+
+    let again = tokio::time::timeout(
+        PROMPT,
+        client.search_open_positions_for_exit(close_request().account_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("an exit position search in a cooldown must not wait"));
+    let query = tokio::time::timeout(PROMPT, client.query_orders_for_exit(&nonterminal_query()))
+        .await
+        .unwrap_or_else(|_| panic!("an exit order query in a cooldown must not wait"));
+
+    for refused in [again.map(|_| ()), query.map(|_| ())] {
+        assert!(
+            matches!(refused, Err(Error::LocallyRateLimited { kind: RateLimitKind::General, retry_after }) if !retry_after.is_zero() && retry_after <= Duration::from_mins(1))
+        );
+    }
+    positions.assert_calls_async(1).await;
+    orders.assert_calls_async(0).await;
 }
 
 #[test]
