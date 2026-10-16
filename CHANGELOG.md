@@ -8,15 +8,54 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [6.2.0] - 2026-10-16
 
 ### Added
 
+- Reserve shared request capacity for exits, with runtime control, through
+  [#84](https://github.com/SharurTrading/projectx-rs/pull/84), reported by the consuming platform
+  in [SharurMinus #378](https://github.com/SharurTrading/SharurMinus/issues/378).
+  `RateLimitConfig` gains an exit reserve (`with_exit_reserve` / `exit_reserve`), and
+  `Client::set_exit_reserve` replaces it at runtime through the state every clone shares,
+  including releasing it with zero, which remains the default. Cancellations, full closes and
+  partial closes may draw on the whole general budget including the reserve, while ordinary
+  requests are admitted only below it, so an exit keeps admission under full ordinary read
+  pressure. A replacement preserves consumed quota, admitted attempts and provider cooldowns,
+  waiting reads recheck policy changes without losing wakeups, and an invalid replacement is
+  `Error::Configuration` and changes nothing; mutations still refuse immediately without sending
+  and are never automatically retried. Adds a credential-free `exit_reserve` example, and
+  advances the locked `quinn-proto` to 0.11.18 to satisfy the advisory gate.
 - `Client::search_open_positions_for_exit` and `Client::query_orders_for_exit`: the open-position
   search and the order query admitted from the exit reserve, as cancels and closes are, for an
   exit that must read what to cancel and close. Each is sent at most once and never waits: an
   exhausted budget or a provider cooldown is `Error::LocallyRateLimited` without sending, and an
-  HTTP 429 is `Error::ProviderRateLimited`, since a read is never ambiguous.
+  HTTP 429 is `Error::ProviderRateLimited`, since a read is never ambiguous
+  ([#93](https://github.com/SharurTrading/projectx-rs/pull/93)).
+
+### Changed
+
+- Add the repository's step-by-step releasing guide (`RELEASING.md`) and reference it from the
+  release gate in the repository guide through
+  [#86](https://github.com/SharurTrading/projectx-rs/pull/86) and
+  [#87](https://github.com/SharurTrading/projectx-rs/pull/87).
+- Add `docs/behaviour-guide.md`, a venue behaviour guide for wrapping the client — connection,
+  data and execution behaviour with every fact labelled by its source — linked at the top of the
+  README through [#90](https://github.com/SharurTrading/projectx-rs/pull/90) and
+  [#91](https://github.com/SharurTrading/projectx-rs/pull/91); the exit-read admission rules
+  extend it through [#93](https://github.com/SharurTrading/projectx-rs/pull/93).
+- Summarize every crate-root re-export in `src/lib.rs` and pin the public API's type shapes in a
+  dedicated test, changing no signature, under
+  [#88](https://github.com/SharurTrading/projectx-rs/issues/88)
+  ([#89](https://github.com/SharurTrading/projectx-rs/pull/89)).
+- Move the kache local-build-cache instructions out of the README and into the contributing guide
+  through [#92](https://github.com/SharurTrading/projectx-rs/pull/92).
+
+### Security
+
+- Update the locked `rustls` resolution from 0.23.45 to 0.23.46 for RUSTSEC-2026-0346,
+  RUSTSEC-2026-0347, RUSTSEC-2026-0348 and RUSTSEC-2026-0349 (published 2026-10-14): the locked
+  0.23.45 is affected and fails the repository's dependency and advisory gates. Lockfile only;
+  no source change.
 
 ## [6.1.1] - 2026-10-12
 
@@ -360,6 +399,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[6.2.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.1...v6.2.0
 [6.1.1]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.0.0...v6.1.0
 [6.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v5.0.1...v6.0.0
