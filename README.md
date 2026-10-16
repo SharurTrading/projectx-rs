@@ -651,35 +651,36 @@ All three must pass for the live validation gate.
 
 ## Contributor build cache
 
-Kache is optional for local builds. Use the pinned version **1.0.0**.
-GitHub-hosted CI uses the repository's Rust cache setup without Kache.
-Start with the official
-[Kache quick start](https://ninja.kunobi.com/docs/kache/getting-started/quick-start),
-[configuration reference](https://ninja.kunobi.com/docs/kache/getting-started/configuration)
-and [CI guide](https://ninja.kunobi.com/docs/kache/remote-cache/ci).
+Kache is optional for local builds. Install the current release (this setup was
+checked with **1.2.2**) and run its setup once. The official
+[Kache quick start](https://ninja.kunobi.com/docs/kache/getting-started/quick-start)
+and [configuration reference](https://ninja.kunobi.com/docs/kache/getting-started/configuration)
+cover the details.
+GitHub-hosted CI does not use Kache (see [CI build cache](#ci-build-cache)).
 
 ```sh
-cargo install kache --version 1.0.0 --locked
-kache --version
+cargo install kache --locked
+kache init
+kache doctor
 ```
 
-From the repository root, enable it for the current shell:
+`kache init` shows its plan and asks once before applying it; `kache init --check`
+previews it without changing anything. It configures:
 
-```sh
-export RUSTC_WRAPPER=kache
-export KACHE_CONFIG="$PWD/.kache.toml"
-export KACHE_LOCAL_ONLY=1
-export KACHE_DEFERRED_DISCOVERY=0
-export KACHE_MODIFIED_INPUT_GUARD=1
-export KACHE_KEY_SALT=sharurtrading-kache-prepass-2026-10-11
-export KACHE_VERIFY_RESTORES=always
-export CARGO_INCREMENTAL=0
-export CARGO_TARGET_DIR="$PWD/target/kache-prepass-v1"
-export KACHE_CACHE_DIR="$PWD/target/.kache-cache/prepass-v1"
-```
+| Part | Effect |
+| --- | --- |
+| Cargo wrapper | `~/.cargo/config.toml` runs rustc through Kache |
+| `cargo doc` | `build.rustdoc` is set so documentation builds are cached |
+| Shell startup file | Compiler shims on `PATH` (C and C++ in build scripts), Cargo target protection and test pacing, so test binaries wait for the CPU slots builds use |
+| Login service | The background daemon starts at login |
+| Free-space recovery | Optional: below 10 GiB free, also remove target directories no build used for a day |
 
-Run the repository's usual Cargo quality commands after this setup.
-[.kache.toml](.kache.toml) defines the reviewed policy:
+Open a new terminal afterwards: the shims and test pacing apply only to new shells.
+`kache doctor` then reports `All checks passed` and lists this repository's
+`.kache.toml` as its config file. Use cargo as usual, with one target directory
+per checkout when several worktrees build at once.
+
+[.kache.toml](.kache.toml) defines the reviewed cache policy:
 
 | Setting | Behavior |
 | --- | --- |
@@ -688,7 +689,11 @@ Run the repository's usual Cargo quality commands after this setup.
 | `modified_input_guard = true` | Reject inputs newer than the build start |
 | `key_salt` | Isolate entries under this discovery policy |
 | `gc_max_age_hours = 48` | Use Kache GC for age retention |
-| `KACHE_VERIFY_RESTORES=always` | Verify restored blob checksums |
+
+The daemon's own limits live in the host file `~/.config/kache/config.toml`
+(`cache.local_max_size`, `cache.auto_recover_targets`), not in the repository
+file; edit that file and let the daemon restart. `kache stats` shows the store's
+size against its limit, and `kache clean --cache` empties the store.
 
 > [!IMPORTANT]
 > Keep source files unchanged while a build runs; use a separate checkout for
@@ -702,10 +707,8 @@ Run the repository's usual Cargo quality commands after this setup.
 > ```
 
 Inspect reuse with `kache stats --last-build`, `kache explain` and `kache doctor`.
-For persistent local setup, `kache init --check` previews Cargo configuration
-changes before `kache init` applies them. Environment variables take precedence
-over the repository file; retain the policy above and restart any existing daemon
-when changing its environment, as described in the configuration reference.
+`KACHE_DISABLED=1 cargo build` keeps the wrapper in place but passes compilation
+through.
 
 ### CI build cache
 
