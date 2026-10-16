@@ -8,9 +8,9 @@ use std::time::Duration;
 use httpmock::prelude::*;
 use projectx_client::{
     AccountId, AmbiguityOrigin, BarUnit, CancelOrder, Client, CloseContract, ContractId,
-    Credentials, Endpoints, Error, HistoryRequest, ModifyOrder, OrderId, OrderType,
-    PartialCloseContract, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side, Timestamp,
-    TradeQuery,
+    Credentials, Endpoints, Error, HistoryRequest, ModifyOrder, OrderId, OrderQuery, OrderStatus,
+    OrderType, PartialCloseContract, PlaceOrder, RateLimit, RateLimitConfig, RateLimitKind, Side,
+    Timestamp, TradeQuery,
 };
 use serde_json::json;
 
@@ -569,6 +569,208 @@ async fn reserved_exit_server_errors_are_ambiguous_single_attempts() {
     cancel.assert_calls_async(1).await;
     close.assert_calls_async(1).await;
     partial.assert_calls_async(1).await;
+}
+
+fn nonterminal_query() -> OrderQuery {
+    OrderQuery::builder(close_request().account_id)
+        .statuses([
+            OrderStatus::Open,
+            OrderStatus::Pending,
+            OrderStatus::PendingCancellation,
+            OrderStatus::Suspended,
+        ])
+        .page_size(100)
+        .include_total_count(true)
+        .build()
+        .unwrap_or_else(|error| panic!("fixture order query must be valid: {error}"))
+}
+
+/// The exit reads' gateway: an open position and one nonterminal order, beside
+/// the trade search that fills the ordinary budget and the close that spends the
+/// reserve.
+struct ExitReads<'a> {
+    trades: httpmock::Mock<'a>,
+    positions: httpmock::Mock<'a>,
+    orders: httpmock::Mock<'a>,
+    close: httpmock::Mock<'a>,
+}
+
+async fn exit_reads(server: &MockServer) -> ExitReads<'_> {
+    let trades = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Trade/search");
+            then.status(200)
+                .json_body(json!({"trades": [], "success": true, "errorCode": 0}));
+        })
+        .await;
+    let positions = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/searchOpen");
+            then.status(200).json_body(json!({
+                "positions": [{"id": 7, "accountId": 42, "contractId": "CON.F.US.MNQ.M26",
+                    "creationTimestamp": "2026-01-01T00:00:00Z", "type": 1, "size": 1,
+                    "averagePrice": 21000.25}],
+                "success": true, "errorCode": 0,
+            }));
+        })
+        .await;
+    let orders = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Order/v2/query");
+            then.status(200).json_body(json!({
+                "orders": [{"id": 84, "accountId": 42, "contractId": "CON.F.US.MNQ.M26",
+                    "creationTimestamp": "2026-01-01T00:00:00Z",
+                    "updateTimestamp": "2026-01-01T00:00:00Z", "status": 8, "type": 4,
+                    "side": 1, "size": 1, "fillVolume": 0, "parentOrderId": 80}],
+                "totalCount": 1, "success": true, "errorCode": 0,
+            }));
+        })
+        .await;
+    let close = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/closeContract");
+            then.status(200)
+                .json_body(json!({"success": true, "errorCode": 0}));
+        })
+        .await;
+    ExitReads {
+        trades,
+        positions,
+        orders,
+        close,
+    }
+}
+
+/// Fills the ordinary budget of `reserve_config` with trade searches.
+async fn fill_ordinary(client: &Client) {
+    let query = TradeQuery::builder(close_request().account_id)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    for _ in 0..3 {
+        assert!(client.query_trades(&query).await.is_ok());
+    }
+}
+
+const PROMPT: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+async fn exit_reads_go_out_at_once_under_full_ordinary_pressure() {
+    let server = MockServer::start_async().await;
+    let gateway = exit_reads(&server).await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    fill_ordinary(&client).await;
+    let query = TradeQuery::builder(close_request().account_id)
+        .build()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let shared = client.clone();
+    let mut waiting = Box::pin(shared.query_trades(&query));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+
+    let positions = tokio::time::timeout(
+        PROMPT,
+        client.search_open_positions_for_exit(close_request().account_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the exit position search must not wait"))
+    .unwrap_or_else(|error| panic!("the exit position search must be admitted: {error}"));
+    let orders = tokio::time::timeout(PROMPT, client.query_orders_for_exit(&nonterminal_query()))
+        .await
+        .unwrap_or_else(|_| panic!("the exit order query must not wait"))
+        .unwrap_or_else(|error| panic!("the exit order query must be admitted: {error}"));
+
+    assert_eq!(positions.into_listed().map(|rows| rows.len()), Some(1));
+    assert_eq!(orders.total_count, Some(1));
+    assert_eq!(orders.orders.into_listed().map(|rows| rows.len()), Some(1));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    gateway.trades.assert_calls_async(3).await;
+    gateway.positions.assert_calls_async(1).await;
+    gateway.orders.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn exit_reads_spend_the_exit_reserve_and_not_the_ordinary_budget() {
+    let server = MockServer::start_async().await;
+    let gateway = exit_reads(&server).await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    fill_ordinary(&client).await;
+
+    for _ in 0..2 {
+        let read = tokio::time::timeout(
+            PROMPT,
+            client.search_open_positions_for_exit(close_request().account_id),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the exit position search must not wait"));
+        assert!(read.is_ok());
+    }
+
+    assert!(matches!(
+        client.close_contract(&close_request()).await,
+        Err(Error::LocallyRateLimited {
+            kind: RateLimitKind::General,
+            ..
+        })
+    ));
+    gateway.positions.assert_calls_async(2).await;
+    gateway.close.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn an_exhausted_exit_reserve_refuses_exit_reads_without_sending() {
+    let server = MockServer::start_async().await;
+    let gateway = exit_reads(&server).await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+    fill_ordinary(&client).await;
+    for _ in 0..2 {
+        assert!(client.close_contract(&close_request()).await.is_ok());
+    }
+
+    let positions = tokio::time::timeout(
+        PROMPT,
+        client.search_open_positions_for_exit(close_request().account_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("an exhausted exit position search must not wait"));
+    let orders = tokio::time::timeout(PROMPT, client.query_orders_for_exit(&nonterminal_query()))
+        .await
+        .unwrap_or_else(|_| panic!("an exhausted exit order query must not wait"));
+
+    for refused in [positions.map(|_| ()), orders.map(|_| ())] {
+        assert!(
+            matches!(refused, Err(Error::LocallyRateLimited { kind: RateLimitKind::General, retry_after }) if !retry_after.is_zero() && retry_after <= Duration::from_mins(1))
+        );
+    }
+    gateway.close.assert_calls_async(2).await;
+    gateway.positions.assert_calls_async(0).await;
+    gateway.orders.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn a_provider_429_on_an_exit_read_is_a_plain_refusal_sent_once() {
+    let server = MockServer::start_async().await;
+    let positions = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Position/searchOpen");
+            then.status(429).header("Retry-After", "60");
+        })
+        .await;
+    let client = fixture_client(&server, reserve_config(), 3);
+    authenticate(&client, &server).await;
+
+    let refused = tokio::time::timeout(
+        PROMPT,
+        client.search_open_positions_for_exit(close_request().account_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("a refused exit position search must not wait to retry"));
+
+    assert!(
+        matches!(refused, Err(Error::ProviderRateLimited { kind: RateLimitKind::General, retry_after }) if retry_after == Duration::from_mins(1))
+    );
+    positions.assert_calls_async(1).await;
 }
 
 #[test]

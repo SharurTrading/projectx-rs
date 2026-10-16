@@ -697,6 +697,23 @@ impl Client {
         accepted(response, ErrorCodeTable::OrderSearch)
     }
 
+    /// Queries filtered orders for an exit, admitted from the exit reserve.
+    ///
+    /// The same query as [`Self::query_orders`], admitted and sent as
+    /// [`Self::search_open_positions_for_exit`] is: from the whole general
+    /// budget, never waiting, at most once. Select every non-terminal status,
+    /// [`OrderStatus::Suspended`](crate::OrderStatus::Suspended) included, to
+    /// find a bracket's inactive children.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::search_open_positions_for_exit`].
+    pub async fn query_orders_for_exit(&self, request: &OrderQuery) -> Result<OrderPage, Error> {
+        let response: Envelope<OrderPage> =
+            self.post_exit_read("api/Order/v2/query", request).await?;
+        accepted(response, ErrorCodeTable::OrderSearch)
+    }
+
     /// Places an order exactly once.
     ///
     /// This method never retries. An untrustworthy response is returned as
@@ -786,6 +803,31 @@ impl Client {
                 "api/Position/searchOpen",
                 &AccountRequest { account_id },
             )
+            .await?;
+        Ok(accepted(response, ErrorCodeTable::PositionSearch)?.positions)
+    }
+
+    /// Searches open positions for an exit, admitted from the exit reserve.
+    ///
+    /// The same read as [`Self::search_open_positions`], for an exit that must
+    /// learn what to close before it can close it. It is admitted as cancels and
+    /// closes are: from the whole general budget, the exit reserve included, so
+    /// ordinary requests holding their share never delay it. It never waits for
+    /// capacity and is sent at most once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocallyRateLimited`] without sending when the general
+    /// budget, reserve included, is spent or a provider cooldown is in force;
+    /// [`Error::ProviderRateLimited`] for an HTTP 429, a refused read that is
+    /// not retried; and an error for authentication, transport, provider, or
+    /// decode failures.
+    pub async fn search_open_positions_for_exit(
+        &self,
+        account_id: AccountId,
+    ) -> Result<ProviderList<Position>, Error> {
+        let response: Envelope<PositionsBody> = self
+            .post_exit_read("api/Position/searchOpen", &AccountRequest { account_id })
             .await?;
         Ok(accepted(response, ErrorCodeTable::PositionSearch)?.positions)
     }
@@ -968,19 +1010,41 @@ impl Client {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        let exit = match mutation {
+            MutationKind::OrderCancellation
+            | MutationKind::PositionClose
+            | MutationKind::PartialPositionClose => true,
+            MutationKind::OrderPlacement | MutationKind::OrderModification => false,
+        };
+        self.post_once(exit, mutation.path(), body).await
+    }
+
+    /// Sends one read an exit needs, admitted from the exit reserve, at most once.
+    async fn post_exit_read<T, R>(&self, path: &str, body: &T) -> Result<R, Error>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        self.post_once(true, path, body).await
+    }
+
+    /// Sends one general request without waiting for capacity: an exit is
+    /// admitted from the whole budget, anything else only below the reserve.
+    async fn post_once<T, R>(&self, exit: bool, path: &str, body: &T) -> Result<R, Error>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         let encoded = serde_json::to_vec(body).map_err(Error::Encode)?;
         self.require_authentication()?;
         let kind = RateLimitKind::General;
-        match mutation {
-            MutationKind::OrderCancellation
-            | MutationKind::PositionClose
-            | MutationKind::PartialPositionClose => self.rate_limits.try_acquire_exit(),
-            MutationKind::OrderPlacement | MutationKind::OrderModification => {
-                self.rate_limits.try_acquire(kind)
-            }
+        if exit {
+            self.rate_limits.try_acquire_exit()
+        } else {
+            self.rate_limits.try_acquire(kind)
         }
         .map_err(|retry_after| Error::LocallyRateLimited { kind, retry_after })?;
-        self.post_authenticated_once(kind, mutation.path(), &encoded)
+        self.post_authenticated_once(kind, path, &encoded)
             .await
             .map(|(response, _basis)| response)
     }
