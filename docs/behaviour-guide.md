@@ -69,8 +69,17 @@ nothing was sent.
 
 Client: `RateLimitConfig::with_exit_reserve(n)` and
 `Client::set_exit_reserve(n)` hold back `n` of the 200 requests. Only
-`cancel_order`, `close_contract` and `partial_close_contract` may use them.
-Everything else stops at `200 - n`.
+`cancel_order`, `close_contract`, `partial_close_contract` and the two exit
+reads, `search_open_positions_for_exit` and `query_orders_for_exit`, may use
+them. Everything else stops at `200 - n`.
+
+Client: the exit reads are for an exit that must learn what to close before
+it can close it, such as a flatten of an account you have not read yet. They
+are admitted like the exit mutations: they never wait, they are sent at most
+once, and when the window is full they fail at once with
+`Error::LocallyRateLimited`. A 429 on one is a plain
+`Error::ProviderRateLimited`, since a read changes nothing at the venue. Size
+the reserve for them too: two requests per account an exit must read.
 
 What worked for us:
 
@@ -129,6 +138,12 @@ Client: a mutation that may have reached the venue, but whose answer is
 unclear, returns `Error::AmbiguousMutation`. Timeouts, HTTP 429 after
 sending, and "pending" or "unknown" codes all count. The client never
 retries it. Read venue state before you decide what to do.
+
+Client: the error's text names the operation and the evidence, for example
+`position close outcome is ambiguous (code: 6 OrderPending); reconcile
+provider state before retrying`. A request refused before sending reads
+`local general rate limit is exhausted; retry after 60s`, with the time left
+in the window.
 
 ## Data
 
@@ -336,8 +351,22 @@ Observed:
   included. Cancel them yourself.
 - Observed: `close_contract` on a flat contract answers code 2
   (`PositionNotFound`) and pushes nothing.
-- Observed: a partial close answers success with no order id. Match the
-  reduction by account, contract and time.
+- Observed: a close and a partial close each answer success with no order
+  id. Match the close order by account, contract and time.
+- Observed: the close's untagged order row, its fill and the flat or reduced
+  position can all arrive on the user hub before the REST answer.
+
+| Code | `close_contract` | `partial_close_contract` |
+| --- | --- | --- |
+| 1 `AccountNotFound`, 2 `PositionNotFound`, 3 `ContractNotFound`, 4 `ContractNotActive` | Refused | Refused |
+| 5 | `OrderRejected`, refused | `InvalidCloseSize`, refused, also for a size above the position |
+| 6 | `OrderPending`, ambiguous | `OrderRejected`, refused |
+| 7 | `UnknownError`, ambiguous | `OrderPending`, ambiguous |
+| 8 | `AccountRejected`, refused | `UnknownError`, ambiguous |
+| 9 | Undocumented, ambiguous | `AccountRejected`, refused |
+
+Client: a refused code is `Error::Provider`; an ambiguous one is
+`Error::AmbiguousMutation`.
 
 A flatten that worked for us: cancel every working order, including
 suspended bracket children, then close every position. Send each group at
