@@ -8,6 +8,16 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Added
+
+- `Client::search_open_positions_for_exit` and `Client::query_orders_for_exit`: the open-position
+  search and the order query admitted from the exit reserve, as cancels and closes are, for an
+  exit that must read what to cancel and close. Each is sent at most once and never waits: an
+  exhausted budget or a provider cooldown is `Error::LocallyRateLimited` without sending, and an
+  HTTP 429 is `Error::ProviderRateLimited`, since a read is never ambiguous.
+
 ## [6.1.1] - 2026-10-12
 
 ### Fixed

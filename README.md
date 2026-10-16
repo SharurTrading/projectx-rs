@@ -567,6 +567,7 @@ independent history budget is unchanged.
 | Operation | Admission |
 | --- | --- |
 | `cancel_order`, `close_contract`, `partial_close_contract` | Aggregate count below `G`; can consume reserved capacity |
+| `search_open_positions_for_exit`, `query_orders_for_exit` | Aggregate count below `G`; can consume reserved capacity; never wait, never retried, a 429 is `Error::ProviderRateLimited` |
 | Other authenticated general requests, including reads, placement, modification, logout and session validation | Aggregate count below `G - R` |
 | Both classes | One rolling window and provider cooldown, shared by the client and every clone |
 
