@@ -110,13 +110,14 @@ rows for the accounts you subscribe.
   seconds for as long as you have asked it to stay connected.
 - Client: it keeps no subscriptions. After `RealtimeEvent::Reconnected`,
   send every subscription again.
-- Observed: rows missed while a hub was down are not replayed. In one
-  session both hubs were cut while a position was closed. The closing trade
-  never arrived on the stream; a later REST trade search had it.
-- Observed: a close sent while both hubs were down still answered success
-  over REST. After the hubs reconnected, the close's order, fill and flat
-  position row were never pushed. A later `close_contract` on the now-flat
-  contract answered code 2 (`PositionNotFound`).
+- Observed: rows missed while a hub was down are not replayed. Two
+  recorded sessions cut both hubs while a position was closed. In the first,
+  the closing trade never arrived on the stream; a later REST trade search
+  had it. In the second, a close sent during the outage still answered
+  success over REST, and after the hubs reconnected its order, fill and
+  flat position row were never pushed. A later `close_contract` on the
+  contract answered code 2 (`PositionNotFound`). The REST order, position
+  and trade reads after that reconnect were not recorded.
 - Observed: after a reconnect, the trade that opened a lot can be pushed
   again when the lot closes (see [Fills](#fills-fees-and-pnl)).
 
@@ -325,8 +326,9 @@ Observed:
   a session that never saw it. Never book action 1 as a fill.
 - Also de-duplicate by trade id, scoped by account.
 - `fees` and `commissions` are separate fields. The balance is charged
-  both, so add them. A two-contract MNQ fill stated `fees` 0.72 and
-  `commissions` 0.50: 1.22 in all.
+  both, so add them. One sample, from one practice account: a
+  two-contract MNQ fill stated `fees` 0.72 and `commissions` 0.50, 1.22 in
+  all. Fee schedules can differ between accounts.
 - `profitAndLoss` is set on a trade that closes a position and empty on
   one that opens it.
 - One order can fill as several trades at one price: a reversal as a
@@ -347,8 +349,9 @@ Observed:
 - A reversal (long 1, sell 2) produced one position row, short 1, after
   both trades. The row kept its id and opening time.
 - After a first-in-first-out partial exit, `averagePrice` is the remaining
-  lot's own entry price. When a partial close left one of two lots bought
-  together, it stayed at the entry price.
+  lot's own entry price. `partial_close_contract` gave the same figure:
+  when it left one of two lots bought together, `averagePrice` stayed at the
+  entry price.
 - A new position after flat gets a new position id.
 
 ### Closing positions
@@ -360,7 +363,7 @@ Observed:
   and bracket legs included (see [Brackets](#brackets)). Cancel them
   yourself.
 - Observed: `close_contract` on a flat contract answers code 2
-  (`PositionNotFound`) with a null message and pushes nothing.
+  (`PositionNotFound`) with `errorMessage` null and pushes nothing.
 - Observed: a close and a partial close each answer success with no order
   id. Match the close order by account, contract and time.
 - Observed: the close's untagged order row, its fill and the flat or reduced
@@ -387,7 +390,7 @@ once.
 | Request | Answer |
 | --- | --- |
 | Modify a filled order | Code 3, "Order not found" |
-| Cancel an unknown order id | Code 2, no message |
+| Cancel an unknown order id | Code 2, `errorMessage` null |
 | Cancel a filled order | Code 5 (ambiguous) |
 | Place with a reused `customTag` | Code 2, "custom tag ... unique" |
 | Place with size 0 | Code 2, "Invalid order size" |
@@ -426,8 +429,10 @@ Code 5 on a cancel is `UnknownError`. The client reports it as
 - Observed: an Auto OCO entry that filled kept its target and stop `Open`
   after `close_contract` closed the position. Both legs stayed working on
   every order read for about 11 seconds, until the caller cancelled them.
-  The venue does not end a bracket's legs when its position goes flat
-  another way. Cancel them yourself.
+- Unverified: whether the venue ends a bracket's legs when the position goes
+  flat another way (an opposite market order, `partial_close_contract` down
+  to zero, a close from another session), and what a leg left working does
+  if price reaches it. Only `close_contract` was recorded.
 - Unverified: what legs do when the parent fills only in part.
 
 ### Copier follower accounts
@@ -487,6 +492,7 @@ These are limits of the venue or of our evidence, not promises.
 | A resting order filled in parts over time | Not seen |
 | A voided trade | Not seen |
 | Bracket legs on a partly filled parent | Not stated |
+| Bracket legs after another way of going flat | Not seen |
 | Service after `GatewayLogout` | Not stated |
 | Copier follower rejection | Reported, not observed |
 | History with `BarUnit::Tick` | Not tested |
