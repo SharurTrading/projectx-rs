@@ -56,14 +56,14 @@ The second budget is shared by reads, order placement, cancels, closes,
 logout and session validation, on every clone of the client. Login and ping
 are not counted.
 
-Client: reads wait their turn. Money-moving calls never wait. When the
-window is full, they fail at once with `Error::LocallyRateLimited`, and
-nothing was sent.
+Client: reads wait their turn, except the two exit reads described below.
+Money-moving calls never wait. When the window is full, they fail at once
+with `Error::LocallyRateLimited`, and nothing was sent.
 
 > [!WARNING]
 > A busy read loop can use the whole budget. A close or cancel sent next is
 > then refused locally, at exactly the moment you need it. Reads queue;
-> exits do not.
+> exits, the two exit reads included, do not.
 
 ### Reserving room for exits
 
@@ -78,8 +78,10 @@ it can close it, such as a flatten of an account you have not read yet. They
 are admitted like the exit mutations: they never wait, they are sent at most
 once, and when the window is full they fail at once with
 `Error::LocallyRateLimited`. A 429 on one is a plain
-`Error::ProviderRateLimited`, since a read changes nothing at the venue. Size
-the reserve for them too: two requests per account an exit must read.
+`Error::ProviderRateLimited`, since a read changes nothing at the venue. They
+are not retried after a transport failure or a server error either. Size the
+reserve for them too: one request for the position search plus one per page of
+the order query, for each account an exit must read.
 
 What worked for us:
 
