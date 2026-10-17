@@ -348,6 +348,15 @@ Observed:
   type 0. That flat row still carries an `averagePrice`; ignore it.
 - A reversal (long 1, sell 2) produced one position row, short 1, after
   both trades. The row kept its id and opening time.
+- `creationTimestamp` is the position's opening time and stays the same on
+  every row of that position, but its text does not: the first hub push wrote
+  seven fractional digits (`05:42:40.5409089`), and every later hub push and
+  every REST read wrote six (`05:42:40.540908`), the seventh digit cut off. Do
+  not compare two stamps of one position for equality.
+- A position row and the trade that moves it can arrive in either order, a
+  fraction of a millisecond apart: the flat row came 0.38 ms before the
+  closing trade in one session, and a position row 0.46 ms before the entry
+  trade that opened it in another.
 - After a first-in-first-out partial exit, `averagePrice` is the remaining
   lot's own entry price. `partial_close_contract` gave the same figure:
   when it left one of two lots bought together, `averagePrice` stayed at the
@@ -364,6 +373,13 @@ Observed:
   yourself.
 - Observed: `close_contract` on a flat contract answers code 2
   (`PositionNotFound`) with `errorMessage` null and pushes nothing.
+- Observed: with both realtime hubs down, a `close_contract` of a long 2
+  succeeded; 0.5 s later, the hubs still down, a second `close_contract` of
+  that contract answered code 2 (`PositionNotFound`). The first close's
+  order, fill and flat position row were never pushed after the hubs
+  returned. Only the refusal told the client the position was gone.
+- Documented: the client's code table names code 2 `PositionNotFound` on
+  `partial_close_contract` too. We have not seen that answer there.
 - Observed: a close and a partial close each answer success with no order
   id. Match the close order by account, contract and time.
 - Observed: the close's untagged order row, its fill and the flat or reduced
