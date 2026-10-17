@@ -113,11 +113,16 @@ rows for the accounts you subscribe.
 - Observed: rows missed while a hub was down are not replayed. Two
   recorded sessions cut both hubs while a position was closed. In the first,
   the closing trade never arrived on the stream; a later REST trade search
-  had it. In the second, a close sent during the outage still answered
-  success over REST, and after the hubs reconnected its order, fill and
-  flat position row were never pushed. A later `close_contract` on the
-  contract answered code 2 (`PositionNotFound`). The REST order, position
-  and trade reads after that reconnect were not recorded.
+  had it.
+- Observed: in the second, a `close_contract` sent during the outage
+  answered success over REST. A second `close_contract` on the contract,
+  answered 0.5 s after the first with the hubs still down, was refused
+  with code 2 (`PositionNotFound`). The first close's order, fill and flat
+  position row were never pushed, in the 17 s the capture ran after the
+  user hub returned. Nothing on the stream said the position was gone: the
+  refusal was the first sign, and a REST position read about 15 s after the
+  first close showed it flat. The order and position reads after the
+  reconnect all came back empty; no trade read was recorded.
 - Observed: after a reconnect, the trade that opened a lot can be pushed
   again when the lot closes (see [Fills](#fills-fees-and-pnl)).
 
@@ -225,19 +230,29 @@ No row carries a sequence number. Use ids to match rows, not times.
 
 > [!IMPORTANT]
 > A position row's `creationTimestamp` is its opening instant. Observed:
-> it stays the same on every later row, including the flat row, and in one
-> reversal it stayed the same while the side flipped. It cannot tell you
-> how fresh the row is, or order it against trades.
+> it names the same instant on every later row, including the flat row, to
+> the microsecond (see below), and in one reversal it stayed the same while
+> the side flipped. It cannot tell you how fresh the row is, or order it
+> against trades.
 
-Observed: precision varies by channel.
+Observed: precision varies by channel and by row.
 
-- Hub rows have seven decimal places (100 ns).
+- Hub rows carry up to seven decimal places (100 ns). Trailing zeros are
+  dropped, so a stamp can show fewer: some first pushes have six digits,
+  and some later rows five.
 - REST trade search cuts times to the microsecond, so a trade's REST time
   can be slightly earlier than its hub time. We saw 400 ns and 900 ns.
 - A restated trade (action 1) can carry the coarser time too.
+- Other rows restating an earlier instant are cut the same way: a
+  position's `creationTimestamp` on every row after its first push, hub and
+  REST alike (`05:42:40.5409089` became `05:42:40.540908`), and an order's
+  on some later rows (`12:04:55.5494686` became `12:04:55.549468`).
+- A cut drops the digits past the sixth, it does not round, so the value
+  itself changes, by up to 900 ns.
 
-Compare times by value, and never require REST and hub times to be equal.
-Prices also come with varying trailing zeros; compare decimals by value.
+Never require two times for one instant to be equal, as text or by value:
+cut both to the microsecond first. Prices also come with varying trailing
+zeros; compare decimals by value.
 
 ## Execution
 
@@ -295,7 +310,9 @@ Observed, on the user hub:
   order, within a few milliseconds.
 - In a fast burst, a position row and its trade came before any order row
   naming the order. The placement answer came last.
-- A position row can lead its trade. The worst lead we saw was 0.46 ms.
+- A position row can lead its trade, the flat row included: one flat row
+  came 0.38 ms before its closing trade. The worst lead we saw was 0.46 ms,
+  an entry row.
 - Position rows mostly trail their trade, by 0.3 to 11 ms in a burst.
 - A balance can be pushed before the trade it includes.
 - A balance can repeat an older figure after a newer trade. The right
@@ -348,15 +365,8 @@ Observed:
   type 0. That flat row still carries an `averagePrice`; ignore it.
 - A reversal (long 1, sell 2) produced one position row, short 1, after
   both trades. The row kept its id and opening time.
-- `creationTimestamp` is the position's opening time and stays the same on
-  every row of that position, but its text does not: the first hub push wrote
-  seven fractional digits (`05:42:40.5409089`), and every later hub push and
-  every REST read wrote six (`05:42:40.540908`), the seventh digit cut off. Do
-  not compare two stamps of one position for equality.
-- A position row and the trade that moves it can arrive in either order, a
-  fraction of a millisecond apart: the flat row came 0.38 ms before the
-  closing trade in one session, and a position row 0.46 ms before the entry
-  trade that opened it in another.
+- `creationTimestamp` names the same opening instant on every row of the
+  position, but its precision varies (see [Timestamps](#timestamps)).
 - After a first-in-first-out partial exit, `averagePrice` is the remaining
   lot's own entry price. `partial_close_contract` gave the same figure:
   when it left one of two lots bought together, `averagePrice` stayed at the
@@ -373,13 +383,8 @@ Observed:
   yourself.
 - Observed: `close_contract` on a flat contract answers code 2
   (`PositionNotFound`) with `errorMessage` null and pushes nothing.
-- Observed: with both realtime hubs down, a `close_contract` of a long 2
-  succeeded; 0.5 s later, the hubs still down, a second `close_contract` of
-  that contract answered code 2 (`PositionNotFound`). The first close's
-  order, fill and flat position row were never pushed after the hubs
-  returned. Only the refusal told the client the position was gone.
-- Documented: the client's code table names code 2 `PositionNotFound` on
-  `partial_close_contract` too. We have not seen that answer there.
+- Observed: code 2 also answers a close whose position an earlier close
+  emptied during a hub outage (see [Two hubs](#two-hubs)).
 - Observed: a close and a partial close each answer success with no order
   id. Match the close order by account, contract and time.
 - Observed: the close's untagged order row, its fill and the flat or reduced
