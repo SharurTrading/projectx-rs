@@ -221,6 +221,15 @@ domain translation.
   treated as cancellation.
 - Organize source by capability; keep `lib.rs` to documentation and selective re-exports.
 - Tests in `tests/` exercise the public API. Unit tests cover private parsing and invariants.
+- **PX-IDIOMS-01:** New and changed Rust code follows the
+  [Rust idioms and patterns review guide](docs/rust-idioms-and-patterns-review.md), and review
+  findings cite its check IDs. A reviewer names every pre-existing anti-pattern or non-idiomatic
+  idiom the change exposes — inline where it is in the diff, in the review summary where it is
+  outside it — so it is fixed or opened as a tracked issue (PX-FOLLOWUP-01). Pre-existing code is
+  never grandfathered: an allowance or a tracked issue records the idiomatic outcome, not
+  permission to keep or repeat the pattern. Review verifies that new code is idiomatic, not merely
+  that it compiles. The guide is a pure Rust guide and must not be edited or used as a place to
+  store platform-specific rulings; those belong in this file, and the guide points here.
 
 ## Review format
 
