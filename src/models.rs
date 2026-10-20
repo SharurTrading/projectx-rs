@@ -15,6 +15,43 @@ use crate::{
     AccountId, ContractId, OrderId, PositionId, ProviderDate, SymbolId, Timestamp, TradeId,
 };
 
+// Each provider code is declared once and drives both wire directions.
+macro_rules! impl_provider_code {
+    ($name:ident, $unknown:ident, { $($variant:ident => $code:literal),+ $(,)? }) => {
+        impl $name {
+            /// Returns the provider's numeric wire code.
+            #[must_use]
+            pub const fn code(self) -> i32 {
+                match self {
+                    $(Self::$variant => $code,)+
+                    Self::$unknown(code) => code,
+                }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_i32(self.code())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                Ok(match i32::deserialize(deserializer)? {
+                    $($code => Self::$variant,)+
+                    code => Self::$unknown(code),
+                })
+            }
+        }
+    };
+}
+
 /// A `ProjectX` order side.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -27,39 +64,10 @@ pub enum Side {
     Unknown(i32),
 }
 
-impl Side {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::Bid => 0,
-            Self::Ask => 1,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl Serialize for Side {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for Side {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            0 => Self::Bid,
-            1 => Self::Ask,
-            code => Self::Unknown(code),
-        })
-    }
-}
+impl_provider_code!(Side, Unknown, {
+    Bid => 0,
+    Ask => 1,
+});
 
 /// A `ProjectX` order type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,49 +95,15 @@ pub enum OrderType {
     Unknown(i32),
 }
 
-impl OrderType {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::Limit => 1,
-            Self::Market => 2,
-            Self::StopLimit => 3,
-            Self::Stop => 4,
-            Self::TrailingStop => 5,
-            Self::JoinBid => 6,
-            Self::JoinAsk => 7,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl Serialize for OrderType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for OrderType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            1 => Self::Limit,
-            2 => Self::Market,
-            3 => Self::StopLimit,
-            4 => Self::Stop,
-            5 => Self::TrailingStop,
-            6 => Self::JoinBid,
-            7 => Self::JoinAsk,
-            code => Self::Unknown(code),
-        })
-    }
-}
+impl_provider_code!(OrderType, Unknown, {
+    Limit => 1,
+    Market => 2,
+    StopLimit => 3,
+    Stop => 4,
+    TrailingStop => 5,
+    JoinBid => 6,
+    JoinAsk => 7,
+});
 
 /// A `ProjectX` order lifecycle status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,53 +156,17 @@ pub enum OrderSortDirection {
     Descending = 1,
 }
 
-impl OrderStatus {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::None => 0,
-            Self::Open => 1,
-            Self::Filled => 2,
-            Self::Cancelled => 3,
-            Self::Expired => 4,
-            Self::Rejected => 5,
-            Self::Pending => 6,
-            Self::PendingCancellation => 7,
-            Self::Suspended => 8,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl Serialize for OrderStatus {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for OrderStatus {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            0 => Self::None,
-            1 => Self::Open,
-            2 => Self::Filled,
-            3 => Self::Cancelled,
-            4 => Self::Expired,
-            5 => Self::Rejected,
-            6 => Self::Pending,
-            7 => Self::PendingCancellation,
-            8 => Self::Suspended,
-            code => Self::Unknown(code),
-        })
-    }
-}
+impl_provider_code!(OrderStatus, Unknown, {
+    None => 0,
+    Open => 1,
+    Filled => 2,
+    Cancelled => 3,
+    Expired => 4,
+    Rejected => 5,
+    Pending => 6,
+    PendingCancellation => 7,
+    Suspended => 8,
+});
 
 /// A `ProjectX` market-trade aggressor classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,39 +180,10 @@ pub enum TradeLogType {
     Unknown(i32),
 }
 
-impl TradeLogType {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::Buy => 0,
-            Self::Sell => 1,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl Serialize for TradeLogType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for TradeLogType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            0 => Self::Buy,
-            1 => Self::Sell,
-            code => Self::Unknown(code),
-        })
-    }
-}
+impl_provider_code!(TradeLogType, Unknown, {
+    Buy => 0,
+    Sell => 1,
+});
 
 /// A `ProjectX` position direction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,41 +199,11 @@ pub enum PositionType {
     Unknown(i32),
 }
 
-impl PositionType {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::Undefined => 0,
-            Self::Long => 1,
-            Self::Short => 2,
-            Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl Serialize for PositionType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for PositionType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            0 => Self::Undefined,
-            1 => Self::Long,
-            2 => Self::Short,
-            code => Self::Unknown(code),
-        })
-    }
-}
+impl_provider_code!(PositionType, Unknown, {
+    Undefined => 0,
+    Long => 1,
+    Short => 2,
+});
 
 /// A `ProjectX` depth-of-market update kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -358,59 +237,20 @@ pub enum DepthType {
     UnknownCode(i32),
 }
 
-impl DepthType {
-    /// Returns the provider's numeric wire code.
-    #[must_use]
-    pub const fn code(self) -> i32 {
-        match self {
-            Self::Unknown => 0,
-            Self::Ask => 1,
-            Self::Bid => 2,
-            Self::BestAsk => 3,
-            Self::BestBid => 4,
-            Self::Trade => 5,
-            Self::Reset => 6,
-            Self::Low => 7,
-            Self::High => 8,
-            Self::NewBestBid => 9,
-            Self::NewBestAsk => 10,
-            Self::Fill => 11,
-            Self::UnknownCode(code) => code,
-        }
-    }
-}
-
-impl Serialize for DepthType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_i32(self.code())
-    }
-}
-
-impl<'de> Deserialize<'de> for DepthType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match i32::deserialize(deserializer)? {
-            0 => Self::Unknown,
-            1 => Self::Ask,
-            2 => Self::Bid,
-            3 => Self::BestAsk,
-            4 => Self::BestBid,
-            5 => Self::Trade,
-            6 => Self::Reset,
-            7 => Self::Low,
-            8 => Self::High,
-            9 => Self::NewBestBid,
-            10 => Self::NewBestAsk,
-            11 => Self::Fill,
-            code => Self::UnknownCode(code),
-        })
-    }
-}
+impl_provider_code!(DepthType, UnknownCode, {
+    Unknown => 0,
+    Ask => 1,
+    Bid => 2,
+    BestAsk => 3,
+    BestBid => 4,
+    Trade => 5,
+    Reset => 6,
+    Low => 7,
+    High => 8,
+    NewBestBid => 9,
+    NewBestAsk => 10,
+    Fill => 11,
+});
 
 /// Historical-bar aggregation unit.
 ///
@@ -1492,7 +1332,9 @@ fn validate_request_order_type(order_type: OrderType) -> Result<(), RequestValid
         | OrderType::TrailingStop
         | OrderType::JoinBid
         | OrderType::JoinAsk => Ok(()),
-        OrderType::StopLimit => Err(RequestValidationError::UnsupportedOrderType { code: 3 }),
+        OrderType::StopLimit => Err(RequestValidationError::UnsupportedOrderType {
+            code: OrderType::StopLimit.code(),
+        }),
         OrderType::Unknown(code) => Err(RequestValidationError::UnsupportedOrderType { code }),
     }
 }
@@ -2099,33 +1941,24 @@ where
                 .transpose()
                 .map_err(D::Error::custom)?
                 .flatten();
-            let detail = decode_remaining(object).map_err(D::Error::custom)?;
+            let detail = decode_remaining(&object).map_err(D::Error::custom)?;
             return Ok(Self::Rejected {
                 error_code,
                 error_message,
                 detail,
             });
         }
-        let body = decode_remaining(object).map_err(D::Error::custom)?;
+        let body = decode_remaining(&object).map_err(D::Error::custom)?;
         Ok(Self::Accepted(body))
     }
 }
 
 /// Decodes the envelope fields left after the status fields were removed.
-fn decode_remaining<T>(object: BTreeMap<String, Box<RawValue>>) -> serde_json::Result<T>
+fn decode_remaining<T>(object: &BTreeMap<String, Box<RawValue>>) -> serde_json::Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let mut body_json = String::from("{");
-    for (index, (key, value)) in object.into_iter().enumerate() {
-        if index > 0 {
-            body_json.push(',');
-        }
-        body_json.push_str(&serde_json::to_string(&key)?);
-        body_json.push(':');
-        body_json.push_str(value.get());
-    }
-    body_json.push('}');
+    let body_json = serde_json::to_string(object)?;
     serde_json::from_str(&body_json)
 }
 
@@ -2303,6 +2136,51 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn accepted_and_rejected_envelopes_preserve_exact_decimal_tokens() {
+        for (token, expected) in [
+            (
+                "0.1000000000000000000000000001",
+                "0.1000000000000000000000000001",
+            ),
+            (
+                "792281625142643375935439503350e-1",
+                "79228162514264337593543950335",
+            ),
+        ] {
+            for (success, error_code) in [(true, 0), (false, 17)] {
+                let json = format!(
+                    r#"{{"success":{success},"errorCode":{error_code},"accounts":[{{"id":42,"name":"Synthetic","balance":{token},"canTrade":true,"isVisible":true}}]}}"#
+                );
+                let envelope: Envelope<AccountsBody, AccountsBody> = serde_json::from_str(&json)
+                    .unwrap_or_else(|error| panic!("exact envelope must decode: {error}"));
+                let body = match envelope {
+                    Envelope::Accepted(body) => {
+                        assert!(success);
+                        body
+                    }
+                    Envelope::Rejected { detail, .. } => {
+                        assert!(!success);
+                        detail
+                    }
+                    Envelope::InconsistentStatus { .. } => panic!("fixture status is consistent"),
+                };
+                let accounts = body
+                    .accounts
+                    .into_listed()
+                    .unwrap_or_else(|| panic!("fixture accounts are explicitly listed"));
+                assert_eq!(accounts.len(), 1);
+                assert_eq!(
+                    accounts[0]
+                        .balance
+                        .map(|balance| balance.to_string())
+                        .as_deref(),
+                    Some(expected)
+                );
+            }
+        }
     }
 
     #[test]

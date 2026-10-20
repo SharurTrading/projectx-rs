@@ -1787,7 +1787,10 @@ async fn reserved_exit_timeouts_remain_ambiguous_and_send_each_request_once() {
                 accepted = accept_request(&listener) => accepted,
             };
             let (stream, request) = accepted;
-            paths.push(request.lines().next().unwrap_or_default().to_owned());
+            let request_line = request.lines().next().unwrap_or_else(|| {
+                panic!("fixture received an HTTP request without a request line")
+            });
+            paths.push(request_line.to_owned());
             held_connections.push(stream);
             seen_tx
                 .send(())

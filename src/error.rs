@@ -187,13 +187,109 @@ impl fmt::Display for AmbiguityText {
     }
 }
 
+/// Credential field whose configuration was rejected; never contains its value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CredentialField {
+    /// `ProjectX` username.
+    UserName,
+    /// API authentication key.
+    ApiKey,
+    /// Application authentication password.
+    Password,
+    /// Application device identifier.
+    DeviceId,
+    /// Authorized application identifier.
+    AppId,
+    /// Application verification key.
+    VerifyKey,
+}
+
+impl fmt::Display for CredentialField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UserName => "username",
+            Self::ApiKey => "API key",
+            Self::Password => "password",
+            Self::DeviceId => "device ID",
+            Self::AppId => "application identifier",
+            Self::VerifyKey => "verification key",
+        })
+    }
+}
+
+/// A public-safe, machine-readable reason client configuration was rejected.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum ConfigurationError {
+    /// A required application credential was omitted.
+    #[error("{0} is required")]
+    MissingCredential(CredentialField),
+    /// A credential is empty or has surrounding whitespace.
+    #[error("{0} must be non-empty and must not contain surrounding whitespace")]
+    InvalidCredential(CredentialField),
+    /// An endpoint lacks an HTTP(S) scheme, host, or usable base path.
+    #[error("endpoint must be an absolute HTTP(S) base URL with a host")]
+    InvalidEndpointBase,
+    /// A remote endpoint would send credentials over plaintext transport.
+    #[error("remote endpoints must use HTTPS; plain HTTP is allowed only for loopback fixtures")]
+    InsecureRemoteEndpoint,
+    /// An endpoint contains credentials, a query, or a fragment.
+    #[error("endpoint base URL must not contain credentials, a query, or a fragment")]
+    EndpointContainsSensitiveComponents,
+    /// The endpoint scheme could not be converted for a WebSocket connection.
+    #[error("real-time endpoint scheme could not be changed")]
+    RealtimeEndpointScheme,
+    /// Validation cannot run at a zero interval.
+    #[error("validation period must be non-zero")]
+    ZeroValidationPeriod,
+    /// Validation's interval exceeds the monotonic clock range.
+    #[error("validation period cannot be represented by the Tokio clock")]
+    ValidationPeriodOutOfRange,
+    /// A timeout, response limit, or retry delay is zero or inconsistent.
+    #[error("timeout, response limit, and retry delays must be valid and non-zero")]
+    InvalidRequestLimits,
+    /// A timeout or retry delay exceeds the monotonic clock range.
+    #[error("timeout and retry delays must be representable by the Tokio clock")]
+    RequestDurationOutOfRange,
+    /// Proxying would expose a plaintext loopback request outside its fixture.
+    #[error("a proxy cannot be combined with plain-HTTP loopback endpoints")]
+    PlaintextProxy,
+    /// A rate limit has a zero count or an invalid window duration.
+    #[error("rate limits require a positive request count and representable window")]
+    InvalidRateLimit,
+    /// Exit reserve would leave no ordinary request capacity.
+    #[error("exit reserve must be smaller than the general request limit")]
+    ExitReserveExhaustsCapacity,
+    /// Exit reserve was requested while rate limiting is disabled.
+    #[error("exit reserve requires enabled rate limits")]
+    ExitReserveRequiresRateLimits,
+    /// Outbound capacities or the invocation deadline cannot be used by Tokio.
+    #[error(
+        "real-time capacities must fit Tokio's non-zero permit range and the invocation deadline must fit its clock"
+    )]
+    InvalidRealtimeLimits,
+}
+
+/// A validation request was refused locally before network submission.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum ValidationAdmissionError {
+    /// The validator has synchronously closed request admission.
+    #[error("session validator admission is closed")]
+    Closed,
+    /// The tracker already owns an admitted validation request.
+    #[error("session validator already has an admitted request")]
+    Busy,
+}
+
 /// Errors returned by the `ProjectX` client.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Client configuration was invalid.
     #[error("invalid configuration: {0}")]
-    Configuration(String),
+    Configuration(#[from] ConfigurationError),
     /// A provider identifier was invalid.
     #[error("invalid {kind}: {reason}")]
     InvalidIdentifier {
@@ -243,6 +339,9 @@ pub enum Error {
     /// No authenticated bearer token is available.
     #[error("the client is not authenticated")]
     NotAuthenticated,
+    /// A validation request was refused locally before submission.
+    #[error(transparent)]
+    ValidationAdmission(#[from] ValidationAdmissionError),
     /// Session validation may have rotated the provider token, but no
     /// trustworthy response was received.
     #[error("session-validation outcome is ambiguous; authenticate again before using the client")]

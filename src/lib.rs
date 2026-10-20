@@ -19,6 +19,9 @@
 //!
 //! # Example
 //!
+//! This network example is checked for compilation by rustdoc, but it is not
+//! run: authentication requires real credentials and contacting the provider.
+//!
 //! ```no_run
 //! use projectx_client::{Client, Credentials, ProviderList};
 //!
@@ -58,7 +61,10 @@ pub use config::Endpoints;
 /// API-key and authorized-application credentials and their builder.
 pub use credentials::{ApplicationCredentials, ApplicationCredentialsBuilder, Credentials};
 /// Client errors, provider rejections, and ambiguous-mutation origins.
-pub use error::{AmbiguityOrigin, Error, ProviderError};
+pub use error::{
+    AmbiguityOrigin, ConfigurationError, CredentialField, Error, ProviderError,
+    ValidationAdmissionError,
+};
 /// Validated provider account, contract, order, position, symbol, and trade identifiers.
 pub use ids::{AccountId, ContractId, OrderId, PositionId, SymbolId, TradeId};
 /// Provider-native request, response, order, position, trade, and market-data models.

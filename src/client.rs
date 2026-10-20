@@ -12,6 +12,7 @@ use std::{
 use futures_util::StreamExt as _;
 use parking_lot::Mutex;
 use reqwest::{Method, Proxy, header, redirect::Policy};
+use secrecy::{ExposeSecret, SecretString, zeroize::Zeroizing};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,7 @@ use crate::{
     PlaceOrder, Position, ProviderError, ProviderList, RateLimitConfig, RateLimitKind,
     RealtimeClient, SearchContracts, Trade, TradeQuery, TradeSearch,
     credentials::AuthenticationCredentials,
+    error::{ConfigurationError, ValidationAdmissionError},
     error_codes::ErrorCodeTable,
     models::{
         AccountsBody, BarsBody, ContractBody, ContractsBody, EmptyBody, Envelope, OrderBody,
@@ -110,11 +112,11 @@ impl ValidationAttempt {
         store: Arc<TokenStore>,
         basis: TokenSnapshot,
         tracker: Option<&Arc<ValidationTracker>>,
-    ) -> Option<Self> {
-        if tracker.is_some_and(|tracker| !tracker.register(basis.revision())) {
-            return None;
+    ) -> Result<Self, ValidationAdmissionError> {
+        if let Some(tracker) = tracker {
+            tracker.register(basis.revision())?;
         }
-        Some(Self {
+        Ok(Self {
             store,
             basis,
             tracker: tracker.cloned(),
@@ -167,13 +169,16 @@ struct ValidationTrackerState {
 }
 
 impl ValidationTracker {
-    fn register(&self, basis: TokenRevision) -> bool {
+    fn register(&self, basis: TokenRevision) -> Result<(), ValidationAdmissionError> {
         let mut state = self.state.lock();
-        if state.closed || state.active.is_some() {
-            return false;
+        if state.closed {
+            return Err(ValidationAdmissionError::Closed);
+        }
+        if state.active.is_some() {
+            return Err(ValidationAdmissionError::Busy);
         }
         state.active = Some(basis);
-        true
+        Ok(())
     }
 
     fn claim_completion(&self, basis: TokenRevision) -> bool {
@@ -275,7 +280,7 @@ impl Client {
                 name: ErrorCodeTable::Login.name(response.error_code),
             });
         }
-        let token = validate_token(response.token.as_deref())?;
+        let token = validate_token(response.token)?;
         if !attempt.commit(token) {
             tracing::debug!(
                 "discarded a delayed authentication response after another authentication completed"
@@ -299,16 +304,12 @@ impl Client {
     ) -> Result<SessionValidator, Error> {
         if period.is_zero() {
             return Err(Error::Configuration(
-                "validation period must be non-zero".to_owned(),
+                ConfigurationError::ZeroValidationPeriod,
             ));
         }
         let first_tick = tokio::time::Instant::now()
             .checked_add(period)
-            .ok_or_else(|| {
-                Error::Configuration(
-                    "validation period cannot be represented by the Tokio clock".to_owned(),
-                )
-            })?;
+            .ok_or_else(|| Error::Configuration(ConfigurationError::ValidationPeriodOutOfRange))?;
         self.authenticate().await?;
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
@@ -444,7 +445,7 @@ impl Client {
             .await
             .map_err(Error::Transport)?;
         let bytes = self.read_bounded_response(response).await?;
-        if bytes == b"pong" {
+        if bytes.as_slice() == b"pong" {
             Ok(())
         } else {
             Err(Error::UnexpectedStatusResponse)
@@ -470,7 +471,6 @@ impl Client {
         }
         let new_token = response
             .new_token
-            .as_deref()
             .map(|token| validate_token(Some(token)))
             .transpose()?;
         if let Some(outcome) = finish_trustworthy_validation(&self.token, attempt, new_token)? {
@@ -1120,8 +1120,7 @@ impl Client {
             .token
             .versioned_snapshot()
             .ok_or(Error::NotAuthenticated)?;
-        let attempt = ValidationAttempt::new(Arc::clone(&self.token), basis, tracker)
-            .ok_or(Error::NotAuthenticated)?;
+        let attempt = ValidationAttempt::new(Arc::clone(&self.token), basis, tracker)?;
         let response = match self
             .http
             .request(Method::POST, url)
@@ -1182,7 +1181,10 @@ impl Client {
         serde_json::from_slice(&bytes).map_err(Error::Decode)
     }
 
-    async fn read_bounded_response(&self, response: reqwest::Response) -> Result<Vec<u8>, Error> {
+    async fn read_bounded_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let status = response.status();
         if !status.is_success() {
             return Err(Error::UnexpectedStatus {
@@ -1199,7 +1201,7 @@ impl Client {
         let capacity = content_length
             .and_then(|length| usize::try_from(length).ok())
             .unwrap_or(0);
-        let mut bytes = Vec::with_capacity(capacity);
+        let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(Error::Transport)?;
@@ -1273,7 +1275,7 @@ impl SessionValidator {
     pub async fn shutdown(mut self) -> Result<(), Error> {
         let validation_was_active = self.close_validation();
         self.cancellation.cancel();
-        let task_result = if let Some(task) = self.task.take() {
+        let task_result = if let Some(task) = self.task.as_mut() {
             task.await
                 .map_err(|_join_error| Error::BackgroundTaskFailed {
                     task: "session validator",
@@ -1281,6 +1283,7 @@ impl SessionValidator {
         } else {
             Ok(())
         };
+        self.task = None;
         if validation_was_active {
             return Err(Error::AmbiguousSessionValidation);
         }
@@ -1445,7 +1448,7 @@ impl ClientBuilder {
             || self.retry_max < self.retry_initial
         {
             return Err(Error::Configuration(
-                "timeout, response limit, and retry delays must be valid and non-zero".to_owned(),
+                ConfigurationError::InvalidRequestLimits,
             ));
         }
         let now = tokio::time::Instant::now();
@@ -1454,13 +1457,11 @@ impl ClientBuilder {
             .any(|duration| now.checked_add(duration).is_none())
         {
             return Err(Error::Configuration(
-                "timeout and retry delays must be representable by the Tokio clock".to_owned(),
+                ConfigurationError::RequestDurationOutOfRange,
             ));
         }
         if self.proxy.is_some() && self.endpoints.uses_plaintext_transport() {
-            return Err(Error::Configuration(
-                "a proxy cannot be combined with plain-HTTP loopback endpoints".to_owned(),
-            ));
+            return Err(Error::Configuration(ConfigurationError::PlaintextProxy));
         }
         let mut headers = header::HeaderMap::new();
         headers.insert(
@@ -1547,21 +1548,24 @@ fn accepted_with_detail<T, R>(
     }
 }
 
-fn validate_token(raw: Option<&str>) -> Result<String, Error> {
+fn validate_token(raw: Option<SecretString>) -> Result<SecretString, Error> {
     let token = raw
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.expose_secret().is_empty())
         .ok_or(Error::MissingAuthenticationToken)?;
-    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+    if !token
+        .expose_secret()
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic())
+    {
         return Err(Error::InvalidAuthenticationToken);
     }
-    header::HeaderValue::from_str(token).map_err(|_| Error::InvalidAuthenticationToken)?;
-    Ok(token.to_owned())
+    Ok(token)
 }
 
 fn finish_trustworthy_validation(
     store: &TokenStore,
     mut attempt: ValidationAttempt,
-    new_token: Option<String>,
+    new_token: Option<SecretString>,
 ) -> Result<Option<UpdateOutcome>, Error> {
     if !attempt.claim_trustworthy_completion() {
         return Err(Error::AmbiguousSessionValidation);
@@ -1751,12 +1755,20 @@ struct LoginAppRequest<'a> {
     verify_key: &'a str,
 }
 
+fn deserialize_optional_secret<'de, D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|value| value.map(SecretString::from))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoginResponse {
     success: bool,
     error_code: i32,
-    token: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    token: Option<SecretString>,
 }
 
 #[derive(Deserialize)]
@@ -1764,7 +1776,8 @@ struct LoginResponse {
 struct ValidateResponse {
     success: bool,
     error_code: i32,
-    new_token: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_secret")]
+    new_token: Option<SecretString>,
 }
 
 #[derive(Serialize)]
@@ -1836,22 +1849,121 @@ mod tests {
     #[test]
     fn bearer_token_validation_rejects_whitespace_and_control_bytes() {
         assert!(matches!(
-            validate_token(Some("token with spaces")),
+            validate_token(Some(SecretString::from("token with spaces"))),
             Err(Error::InvalidAuthenticationToken)
         ));
         assert!(matches!(
-            validate_token(Some("token\n")),
+            validate_token(Some(SecretString::from("token\n"))),
             Err(Error::InvalidAuthenticationToken)
         ));
         assert!(matches!(
-            validate_token(Some("")),
+            validate_token(Some(SecretString::from(""))),
             Err(Error::MissingAuthenticationToken)
         ));
         assert_eq!(
-            validate_token(Some("synthetic.jwt-token_123"))
-                .unwrap_or_else(|error| panic!("fixture token must be valid: {error}")),
+            validate_token(Some(SecretString::from("synthetic.jwt-token_123")))
+                .unwrap_or_else(|error| panic!("fixture token must be valid: {error}"))
+                .expose_secret(),
             "synthetic.jwt-token_123"
         );
+    }
+
+    #[tokio::test]
+    async fn refused_validation_admission_preserves_the_authenticated_revision() {
+        let credentials = Credentials::new("fixture-user", "fixture-key")
+            .unwrap_or_else(|error| panic!("fixture credentials must be valid: {error}"));
+        let client = Client::builder(credentials)
+            .build()
+            .unwrap_or_else(|error| panic!("fixture client must build: {error}"));
+        assert!(
+            client
+                .token
+                .begin_authentication()
+                .commit(SecretString::from("live-token"))
+        );
+        let basis = client
+            .token
+            .versioned_snapshot()
+            .unwrap_or_else(|| panic!("fixture token must exist"));
+        let tracker = Arc::new(ValidationTracker::default());
+        tracker
+            .register(basis.revision())
+            .unwrap_or_else(|error| panic!("first admission must succeed: {error}"));
+
+        let busy = client.post_validation_once(Some(&tracker)).await;
+        assert!(matches!(
+            busy,
+            Err(Error::ValidationAdmission(ValidationAdmissionError::Busy))
+        ));
+        assert!(client.token.is_authenticated());
+        assert_eq!(tracker.close(), Some(basis.revision()));
+
+        let closed = client.post_validation_once(Some(&tracker)).await;
+        assert!(matches!(
+            closed,
+            Err(Error::ValidationAdmission(ValidationAdmissionError::Closed))
+        ));
+        let retained = client
+            .token
+            .versioned_snapshot()
+            .unwrap_or_else(|| panic!("refusal must preserve the token"));
+        assert_eq!(retained.revision(), basis.revision());
+        assert_eq!(retained.expose(), "live-token");
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_aborts_the_owned_validator_task() {
+        struct NotifyDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _receiver_gone = sender.send(());
+                }
+            }
+        }
+        let (started_sender, started) = tokio::sync::oneshot::channel();
+        let (dropped_sender, dropped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = NotifyDrop(Some(dropped_sender));
+            let _receiver_gone = started_sender.send(());
+            std::future::pending::<Result<(), Error>>().await
+        });
+        started
+            .await
+            .unwrap_or_else(|error| panic!("fixture task must start: {error}"));
+        let validator = SessionValidator {
+            cancellation: CancellationToken::new(),
+            task: Some(task),
+            token: Arc::new(TokenStore::default()),
+            validation_tracker: Arc::new(ValidationTracker::default()),
+        };
+        let mut shutdown = Box::pin(validator.shutdown());
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        drop(shutdown);
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap_or_else(|error| panic!("cancelled shutdown must abort its task: {error}"))
+            .unwrap_or_else(|error| panic!("task must run its destructor: {error}"));
+    }
+
+    #[test]
+    fn decoded_tokens_remain_secret_owned_through_validation() {
+        let login: LoginResponse = serde_json::from_str(
+            r#"{"success":true,"errorCode":0,"token":"synthetic-login-secret"}"#,
+        )
+        .unwrap_or_else(|error| panic!("fixture login must decode: {error}"));
+        let token = validate_token(login.token)
+            .unwrap_or_else(|error| panic!("fixture token must validate: {error}"));
+        assert_eq!(token.expose_secret(), "synthetic-login-secret");
+        assert!(!format!("{token:?}").contains("synthetic-login-secret"));
+        let validation: ValidateResponse = serde_json::from_str(
+            r#"{"success":true,"errorCode":0,"newToken":"synthetic-rotation-secret"}"#,
+        )
+        .unwrap_or_else(|error| panic!("fixture rotation must decode: {error}"));
+        let token = validate_token(validation.new_token)
+            .unwrap_or_else(|error| panic!("fixture rotation must validate: {error}"));
+        assert_eq!(token.expose_secret(), "synthetic-rotation-secret");
+        assert!(!format!("{token:?}").contains("synthetic-rotation-secret"));
     }
 
     #[test]
@@ -1860,7 +1972,7 @@ mod tests {
         assert!(
             losing_store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let losing_tracker = Arc::new(ValidationTracker::default());
         let losing_basis = losing_store
@@ -1871,7 +1983,7 @@ mod tests {
             losing_basis,
             Some(&losing_tracker),
         )
-        .unwrap_or_else(|| panic!("fixture validation must be admitted"));
+        .unwrap_or_else(|error| panic!("fixture validation must be admitted: {error}"));
 
         let closing_revision = losing_tracker
             .close()
@@ -1879,7 +1991,7 @@ mod tests {
         let losing_completion = finish_trustworthy_validation(
             &losing_store,
             losing_attempt,
-            Some("rotated-token".to_owned()),
+            Some(SecretString::from("rotated-token")),
         );
         losing_store.invalidate_revision_if_current(closing_revision);
 
@@ -1893,7 +2005,7 @@ mod tests {
         assert!(
             winning_store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let winning_tracker = Arc::new(ValidationTracker::default());
         let winning_basis = winning_store
@@ -1904,18 +2016,24 @@ mod tests {
             winning_basis,
             Some(&winning_tracker),
         )
-        .unwrap_or_else(|| panic!("fixture validation must be admitted"));
+        .unwrap_or_else(|error| panic!("fixture validation must be admitted: {error}"));
 
         let winning_completion = finish_trustworthy_validation(
             &winning_store,
             winning_attempt,
-            Some("rotated-token".to_owned()),
+            Some(SecretString::from("rotated-token")),
         )
         .unwrap_or_else(|error| panic!("trustworthy completion must win: {error}"));
 
         assert_eq!(winning_completion, Some(UpdateOutcome::Applied));
         assert_eq!(winning_tracker.close(), None);
-        assert_eq!(winning_store.snapshot().as_deref(), Some("rotated-token"));
+        assert_eq!(
+            winning_store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("rotated-token")
+        );
     }
 
     #[test]
@@ -2120,7 +2238,7 @@ mod tests {
         let errors = || {
             vec![
                 Error::NotAuthenticated,
-                Error::Configuration("synthetic".to_owned()),
+                Error::Configuration(ConfigurationError::InvalidRequestLimits),
                 Error::LocallyRateLimited {
                     kind: RateLimitKind::General,
                     retry_after: Duration::from_secs(1),

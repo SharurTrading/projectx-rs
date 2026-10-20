@@ -6,8 +6,8 @@
 use std::{collections::VecDeque, time::Duration};
 
 use super::{
-    Arc, AtomicBool, AtomicUsize, Instant, Notify, Ordering, ParkingMutex, RealtimeError,
-    RealtimeEvent, fmt, mpsc,
+    Arc, AtomicBool, Instant, Notify, Ordering, ParkingMutex, RealtimeError, RealtimeEvent, fmt,
+    mpsc,
 };
 
 /// Identity of one ready socket, scoped to its owning real-time client.
@@ -26,7 +26,6 @@ pub struct RealtimeMessage {
 
 pub(super) struct EventFlow {
     pub(super) state: ParkingMutex<EventFlowState>,
-    pub(super) queued_weight: AtomicUsize,
     gap_pending: AtomicBool,
     changed: Notify,
 }
@@ -34,38 +33,22 @@ pub(super) struct EventFlow {
 #[derive(Default)]
 pub(super) struct EventFlowState {
     pub(super) active_generation: Option<u64>,
+    receiver_closed: bool,
     queued_at: VecDeque<Instant>,
     gap: Option<GapFence>,
 }
 
-// Two retained lifecycle slots suffice: a generation with a real transport gap
-// may start and end, but another generation cannot start until it is consumed.
+// A gap retains the terminal boundary after the already-queued start event.
+// Replacement generations wait until the caller consumes and acknowledges it.
 struct GapFence {
     generation: u64,
-    start_event: Option<RealtimeEvent>,
     terminal_event: Option<RealtimeEvent>,
     generation_ended: bool,
     acknowledged: bool,
 }
 
-struct EventReservation {
-    flow: Arc<EventFlow>,
-    weight: usize,
-}
-
-impl Drop for EventReservation {
-    fn drop(&mut self) {
-        let previous = self
-            .flow
-            .queued_weight
-            .fetch_sub(self.weight, Ordering::AcqRel);
-        debug_assert!(previous >= self.weight);
-    }
-}
-
 pub(super) struct EventEnvelope {
     message: RealtimeMessage,
-    reservation: EventReservation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,12 +60,7 @@ pub(super) enum PublishOutcome {
 
 impl EventEnvelope {
     fn into_message(self) -> RealtimeMessage {
-        let Self {
-            message,
-            reservation,
-        } = self;
-        drop(reservation);
-        message
+        self.message
     }
 }
 
@@ -90,7 +68,6 @@ impl EventFlow {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: ParkingMutex::new(EventFlowState::default()),
-            queued_weight: AtomicUsize::new(0),
             gap_pending: AtomicBool::new(false),
             changed: Notify::new(),
         })
@@ -102,6 +79,9 @@ impl EventFlow {
 
     pub(super) fn start_generation(&self, generation: u64) -> Result<(), RealtimeError> {
         let mut state = self.state.lock();
+        if state.receiver_closed {
+            return Err(RealtimeError::EventReceiverClosed);
+        }
         if state.gap.is_some() {
             return Err(RealtimeError::TransportGapPending);
         }
@@ -113,28 +93,25 @@ impl EventFlow {
     }
 
     pub(super) fn publish(
-        self: &Arc<Self>,
+        &self,
         events: &mpsc::UnboundedSender<EventEnvelope>,
         generation: u64,
         event: RealtimeEvent,
-        weight: usize,
     ) -> Result<PublishOutcome, RealtimeError> {
         let mut state = self.state.lock();
         if state.active_generation != Some(generation) {
             return Ok(PublishOutcome::StaleGeneration);
         }
+        if events.is_closed() {
+            return Err(RealtimeError::EventReceiverClosed);
+        }
         if state.gap.is_some() {
             return Ok(self.retain_gap_boundary(&mut state, generation, event));
         }
-        self.queued_weight.fetch_add(weight, Ordering::AcqRel);
         let envelope = EventEnvelope {
             message: RealtimeMessage {
                 generation: RealtimeGeneration(generation),
                 event,
-            },
-            reservation: EventReservation {
-                flow: Arc::clone(self),
-                weight,
             },
         };
         match events.send(envelope) {
@@ -154,16 +131,11 @@ impl EventFlow {
     ) -> PublishOutcome {
         let fence = state.gap.get_or_insert(GapFence {
             generation,
-            start_event: None,
             terminal_event: None,
             generation_ended: false,
             acknowledged: false,
         });
         let retained = match event {
-            RealtimeEvent::Connected | RealtimeEvent::Reconnected => {
-                fence.start_event = Some(event);
-                true
-            }
             RealtimeEvent::Disconnected => {
                 fence.terminal_event = Some(event);
                 true
@@ -181,7 +153,7 @@ impl EventFlow {
 
     pub(super) fn mark_gap(&self, generation: u64) {
         let mut state = self.state.lock();
-        if state.active_generation == Some(generation) {
+        if !state.receiver_closed && state.active_generation == Some(generation) {
             let _ = self.retain_gap_boundary(&mut state, generation, RealtimeEvent::TransportGap);
         }
     }
@@ -200,9 +172,11 @@ impl EventFlow {
     }
 
     fn release_acknowledged(&self, state: &mut EventFlowState) {
-        if state.gap.as_ref().is_some_and(|fence| {
-            fence.acknowledged && fence.start_event.is_none() && fence.terminal_event.is_none()
-        }) {
+        if state
+            .gap
+            .as_ref()
+            .is_some_and(|fence| fence.acknowledged && fence.terminal_event.is_none())
+        {
             state.gap = None;
             self.gap_pending.store(false, Ordering::Release);
         }
@@ -270,9 +244,7 @@ impl RealtimeEventReceiver {
                     return Some(envelope.into_message());
                 }
                 if let Some(fence) = state.gap.as_mut() {
-                    let event = if let Some(event) = fence.start_event.take() {
-                        Some(event)
-                    } else if !fence.acknowledged && !self.gap_reported {
+                    let event = if !fence.acknowledged && !self.gap_reported {
                         self.gap_reported = true;
                         Some(RealtimeEvent::TransportGap)
                     } else if fence.generation_ended {
@@ -320,7 +292,12 @@ impl Drop for RealtimeEventReceiver {
     fn drop(&mut self) {
         let mut state = self.flow.state.lock();
         self.events.close();
+        state.receiver_closed = true;
         state.queued_at.clear();
+        state.gap = None;
+        self.flow.gap_pending.store(false, Ordering::Release);
+        drop(state);
+        self.flow.changed.notify_waiters();
     }
 }
 
@@ -331,10 +308,6 @@ impl fmt::Debug for RealtimeEventReceiver {
             .field("gap_pending", &self.flow.has_unacknowledged_gap())
             .field("queued_events", &self.queued_event_count())
             .field("oldest_event_age", &self.oldest_event_age())
-            .field(
-                "queued_weight",
-                &self.flow.queued_weight.load(Ordering::Acquire),
-            )
             .field("gap_reported", &self.gap_reported)
             .finish_non_exhaustive()
     }

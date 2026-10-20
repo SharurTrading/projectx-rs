@@ -10,7 +10,7 @@ fn configured_client(credentials: Credentials, reserve_requests: usize) -> Resul
     Client::builder(credentials).rate_limits(limits).build()
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = Credentials::new("fixture-user", "fixture-key")?;
     let client = configured_client(credentials, 20)?;
     let reads = client.clone();
@@ -19,8 +19,6 @@ fn main() -> Result<(), Error> {
     client.set_exit_reserve(20)?;
     match client.set_exit_reserve(200) {
         Err(Error::Configuration(_)) => Ok(()),
-        _ => Err(Error::Configuration(
-            "full-window reserve was accepted".into(),
-        )),
+        outcome => Err(format!("expected invalid-reserve refusal, got {outcome:?}").into()),
     }
 }

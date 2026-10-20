@@ -3,8 +3,9 @@
 
 //! Public monetary DTO decoding uses exact, independently synthetic values.
 
-use projectx_client::{Account, Contract, SignalRInvocation};
+use projectx_client::{Account, Contract, RealtimeError, SignalRInvocation};
 use rust_decimal::Decimal;
+use serde_json::value::RawValue;
 
 fn account(token: &str) -> Result<Account, serde_json::Error> {
     serde_json::from_str(&format!(
@@ -104,6 +105,75 @@ fn optional_null_and_absence_remain_distinct_from_required_numbers() {
     assert_eq!(missing.balance, None);
     assert!(contract("null").is_err());
     assert!(account(r#""null""#).is_err());
+}
+
+fn invocation(payload: &str) -> SignalRInvocation {
+    SignalRInvocation::from_json(&format!(
+        r#"{{"type":1,"target":"GatewayAccount","arguments":[{payload}]}}"#
+    ))
+    .unwrap_or_else(|error| panic!("invocation must decode: {error}"))
+    .unwrap_or_else(|| panic!("fixture is an invocation"))
+}
+
+#[test]
+fn realtime_raw_accessors_preserve_exact_entities_and_unknown_numeric_fields() {
+    let entity = r#"{"id":42,"name":"Synthetic","balance":0.1000000000000000000000000001,"canTrade":true,"isVisible":true,"futureValue":1e400}"#;
+    let payload = format!(r#"{{"data":{entity},"metadata":{{"sequence":1e400}}}}"#);
+    let invocation = invocation(&payload);
+
+    let raw_payload: &RawValue = invocation.payload();
+    assert_eq!(raw_payload.get(), payload);
+    let raw_entity: &RawValue = invocation
+        .entity()
+        .unwrap_or_else(|error| panic!("entity must decode: {error}"));
+    assert_eq!(raw_entity.get(), entity);
+
+    let account = invocation
+        .decode::<Account>()
+        .unwrap_or_else(|error| panic!("unknown numeric fields must be ignored: {error}"));
+    assert_eq!(
+        account.balance.map(|value| value.to_string()).as_deref(),
+        Some("0.1000000000000000000000000001")
+    );
+}
+
+#[test]
+fn realtime_null_and_scalar_data_keep_the_original_payload_entity() {
+    for data in ["null", "7", "true", r#""synthetic""#] {
+        let payload = format!(
+            r#"{{"id":42,"name":"Synthetic","balance":1.25,"canTrade":true,"isVisible":true,"data":{data}}}"#
+        );
+        let invocation = invocation(&payload);
+        assert_eq!(
+            invocation
+                .entity()
+                .unwrap_or_else(|error| panic!("fallback entity must decode: {error}"))
+                .get(),
+            payload
+        );
+        let account = invocation
+            .decode::<Account>()
+            .unwrap_or_else(|error| panic!("fallback account must decode: {error}"));
+        assert_eq!(account.id.get(), 42);
+        assert_eq!(account.balance, Some(Decimal::new(125, 2)));
+    }
+}
+
+#[test]
+fn realtime_duplicate_data_fields_report_a_typed_failure_without_a_decoded_entity() {
+    let account = r#"{"id":42,"name":"Synthetic","balance":1.25,"canTrade":true,"isVisible":true}"#;
+    let payload = format!(r#"{{"data":{account},"data":{account}}}"#);
+    let invocation = invocation(&payload);
+
+    assert_eq!(invocation.payload().get(), payload);
+    assert!(matches!(invocation.entity(), Err(RealtimeError::Decode(_))));
+    assert!(matches!(
+        invocation.decode::<Account>(),
+        Err(RealtimeError::Decode(_))
+    ));
+    let batch = invocation.decode_batch::<Account>();
+    assert_eq!(batch.len(), 1);
+    assert!(matches!(batch[0], Err(RealtimeError::Decode(_))));
 }
 
 #[test]

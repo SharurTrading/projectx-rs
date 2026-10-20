@@ -65,27 +65,8 @@ The complete public API is available on [docs.rs](https://docs.rs/projectx-clien
 
 ## Quick start
 
-```rust
-use projectx_client::{Client, Credentials, ProviderList};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), projectx_client::Error> {
-    let credentials = Credentials::new("your-user-name", "your-api-key")?;
-    let client = Client::builder(credentials).build()?;
-
-    client.authenticate().await?;
-    match client.search_active_accounts().await? {
-        ProviderList::Listed(accounts) => {
-            for account in accounts {
-                println!("{}", account.name);
-            }
-        }
-        ProviderList::Absent => eprintln!("the provider omitted the account list"),
-    }
-
-    Ok(())
-}
-```
+See the compiled [quick-start example](examples/quick_start.rs) for authentication and active
+account discovery.
 
 Applications should source secrets outside this library and must not log credentials or bearer
 tokens. See [SECURITY.md](SECURITY.md).
@@ -235,24 +216,8 @@ privately. `Client::builder(Credentials)` selects API-key login. Authorized appl
 application-login contract. Applications that run for more than a short request cycle can instead
 use `authenticate_with_validation(period)`:
 
-```rust
-use std::time::Duration;
-
-use projectx_client::{Client, Credentials};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), projectx_client::Error> {
-    let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
-    let validator = client
-        .authenticate_with_validation(Duration::from_mins(15))
-        .await?;
-
-    // REST requests and real-time hubs created from `client` share the rotating token.
-
-    validator.shutdown().await?;
-    Ok(())
-}
-```
+See the compiled [session-validation example](examples/session_validation.rs) for periodic
+validation and orderly shutdown.
 
 The validator periodically calls the provider's validation endpoint and atomically replaces the
 stored token when the provider returns a new one. Token updates are revision-fenced: an older login
@@ -375,44 +340,25 @@ those variants; the new fields keep the provider's rejection code available on a
 money-moving outcomes instead of only the operation name. The realtime, REST DTO, and builder
 surfaces are unchanged.
 
+## Unreleased API migration
+
+The audit fixes in [#104](https://github.com/SharurTrading/projectx-rs/issues/104) require a
+major release. `SignalRInvocation::payload()` returns `&serde_json::value::RawValue` and
+`entity()` returns `Result<&RawValue, RealtimeError>`. Use `.get()` for exact JSON text;
+use `decode` or `decode_batch` to read provider DTOs with exact decimal fields. Handle the
+`entity()` error when inspecting a provider data envelope. Converting raw JSON to
+`serde_json::Value` opts into that type's numeric precision limits.
+
+Both real-time `invoke` methods borrow an argument slice. Replace owned arguments with
+`&arguments`, or use `&[]` / `&[value]`; the caller retains its arguments after a local refusal.
+`Error::Configuration` now holds a typed `ConfigurationError`, with `CredentialField` identifying
+invalid credential settings without their values. `Error::ValidationAdmission` reports closed or
+busy validator admission separately from authentication loss.
+
 ## Real-time example
 
-```rust
-use projectx_client::{Client, ContractId, Credentials, Hub, RealtimeEvent};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
-    client.authenticate().await?;
-
-    let realtime = client.realtime(Hub::Market);
-    let mut events = realtime
-        .take_event_receiver()
-        .ok_or_else(|| std::io::Error::other("event receiver was already claimed"))?;
-    realtime.connect().await?;
-
-    let contract = ContractId::new("CON.F.US.MNQ.M26")?;
-    realtime.subscribe_contract_trades(&contract).await?;
-
-    while let Some(event) = events.recv().await {
-        match event {
-            RealtimeEvent::Reconnected => {
-                // Replay the application's canonical subscription set.
-                realtime.subscribe_contract_trades(&contract).await?;
-            }
-            RealtimeEvent::TransportGap => {
-                // Mark downstream state stale and start snapshot/reconciliation.
-                // Only after that recovery fence is installed may reconnect resume.
-                events.acknowledge_transport_gap();
-            }
-            _ => {}
-        }
-    }
-
-    realtime.disconnect().await?;
-    Ok(())
-}
-```
+The compiled [real-time example](examples/realtime.rs) demonstrates subscription replay and
+transport-gap recovery.
 
 `take_event_receiver()` can be claimed once because events have a single ordered consumer. The
 receiver should be drained continuously; do not perform slow reconciliation inline in the receive
@@ -430,8 +376,9 @@ Typed helpers reject use with the wrong hub before sending anything:
 Every helper has a matching unsubscribe operation. `invoke()` remains available for a provider
 target that does not yet have a typed helper. Invocations are correlated with SignalR completion
 frames and return only after provider acceptance, provider rejection, timeout, or session failure.
-Inbound invocation messages expose their target and payload and can decode the provider entity into
-a caller-selected Serde type.
+Inbound invocation messages expose their target, payload, and entity as raw JSON. Decode an entity
+directly from its raw JSON with `serde_json::from_str` to preserve the provider's original numeric
+text; routing through `serde_json::Value` can round large integers or decimals before decoding.
 
 ## Bounds, retries, and failure behavior
 
@@ -576,21 +523,8 @@ independent history budget is unchanged.
 
 A wrapper can apply its selected reserve when constructing the shared client:
 
-```rust
-use projectx_client::{Client, Credentials, Error, RateLimitConfig};
-
-fn configured_client(credentials: Credentials, reserve_requests: usize) -> Result<Client, Error> {
-    let limits = RateLimitConfig::default().with_exit_reserve(reserve_requests)?;
-    Client::builder(credentials).rate_limits(limits).build()
-}
-
-fn update_reserve(client: &Client) -> Result<(), Error> {
-    let reads = client.clone();
-    reads.set_exit_reserve(40)?;
-    client.set_exit_reserve(0)?;
-    Ok(())
-}
-```
+The compiled [exit-reserve example](examples/exit_reserve.rs) demonstrates configuration and
+runtime updates.
 
 The configuration and runtime changes are exercised by the credential-free
 [configuration example](examples/exit_reserve.rs): `cargo run --example exit_reserve`.
