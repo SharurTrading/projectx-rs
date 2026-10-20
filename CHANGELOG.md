@@ -8,11 +8,12 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [7.0.0] - 2026-10-20
 
 ### Breaking changes
 
-- Resolve the Rust idiom audit in [#104](https://github.com/SharurTrading/projectx-rs/issues/104).
+- Resolve the Rust idiom audit in [#104](https://github.com/SharurTrading/projectx-rs/issues/104)
+  through [#105](https://github.com/SharurTrading/projectx-rs/pull/105).
   `SignalRInvocation::payload()` now returns exact `serde_json::value::RawValue`;
   `entity()` returns `Result<&RawValue, RealtimeError>` so malformed data envelopes remain
   explicit failures. Use `.get()` for JSON text or `decode` / `decode_batch` for exact provider
@@ -24,7 +25,6 @@ first public release.
   causes and credential field identities are machine-readable and contain no supplied values.
   `Error::ValidationAdmission` distinguishes closed or busy validator admission from a lost
   authenticated session. These API changes require a major release.
-
 
 ### Fixed
 
@@ -43,8 +43,25 @@ first public release.
   crate docs, the `Client` docs, and `ClientBuilder::max_retries` now say
   `search_open_positions_for_exit` and `query_orders_for_exit` refuse locally without sending
   and are never retried, matching the README and the behaviour guide, whose reserve-sizing tip
-  now also counts the exit reads. Recovered unmerged follow-up to
-  [#95](https://github.com/SharurTrading/projectx-rs/pull/95). Documentation only.
+  now also counts the exit reads
+  ([#96](https://github.com/SharurTrading/projectx-rs/pull/96), completing the documentation
+  corrections from [#95](https://github.com/SharurTrading/projectx-rs/pull/95)). Documentation only.
+
+### Changed
+
+- Expand the venue behaviour guide with observed close and bracket behaviour, timestamp
+  precision, row ordering, and recovery after both hubs disconnect through
+  [#97](https://github.com/SharurTrading/projectx-rs/pull/97),
+  [#98](https://github.com/SharurTrading/projectx-rs/pull/98), and
+  [#99](https://github.com/SharurTrading/projectx-rs/pull/99).
+- Add the Rust idioms and patterns review guide through
+  [#103](https://github.com/SharurTrading/projectx-rs/pull/103).
+- Update the locked `serde_json` to 1.0.154, `tokio` to 1.53.3, and `tokio-util` to 0.7.20
+  ([#102](https://github.com/SharurTrading/projectx-rs/pull/102)), and refresh pinned
+  `taiki-e/install-action` and `dtolnay/rust-toolchain` CI actions
+  ([#100](https://github.com/SharurTrading/projectx-rs/pull/100),
+  [#101](https://github.com/SharurTrading/projectx-rs/pull/101)). The minimum supported Rust
+  version remains 1.95.0.
 
 ## [6.2.0] - 2026-10-16
 
@@ -442,6 +459,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[7.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.2.0...v7.0.0
 [6.2.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.1...v6.2.0
 [6.1.1]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.0.0...v6.1.0

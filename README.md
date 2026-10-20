@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=6.2.0)](https://crates.io/crates/projectx-client/6.2.0)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/6.2.0?v=6.2.0)](https://docs.rs/projectx-client/6.2.0/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=7.0.0)](https://crates.io/crates/projectx-client/7.0.0)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/7.0.0?v=7.0.0)](https://docs.rs/projectx-client/7.0.0/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 > [!IMPORTANT]
@@ -28,7 +28,7 @@ This README documents the additional safety and lifecycle behavior supplied by t
 
 The minimum supported Rust version is 1.95.0.
 
-Version 6 follows Semantic Versioning. Public API changes that require downstream source changes
+Version 7 follows Semantic Versioning. Public API changes that require downstream source changes
 will be released under a new major version; additive APIs and fixes use minor and patch releases.
 Provider contract changes can still require callers to update operational behavior, so review the
 changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
@@ -36,14 +36,14 @@ changelog before upgrading and keep recovery around ambiguous money-moving outco
 ## Installation
 
 ```sh
-cargo add projectx-client@6
+cargo add projectx-client@7
 ```
 
 Or add the current major release directly:
 
 ```toml
 [dependencies]
-projectx-client = "6"
+projectx-client = "7"
 ```
 
 The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
@@ -340,10 +340,12 @@ those variants; the new fields keep the provider's rejection code available on a
 money-moving outcomes instead of only the operation name. The realtime, REST DTO, and builder
 surfaces are unchanged.
 
-## Unreleased API migration
+## Migrating from 6.x
 
-The audit fixes in [#104](https://github.com/SharurTrading/projectx-rs/issues/104) require a
-major release. `SignalRInvocation::payload()` returns `&serde_json::value::RawValue` and
+Version 7 includes the audit fixes in
+[#104](https://github.com/SharurTrading/projectx-rs/issues/104), implemented by
+[#105](https://github.com/SharurTrading/projectx-rs/pull/105).
+`SignalRInvocation::payload()` returns `&serde_json::value::RawValue` and
 `entity()` returns `Result<&RawValue, RealtimeError>`. Use `.get()` for exact JSON text;
 use `decode` or `decode_batch` to read provider DTOs with exact decimal fields. Handle the
 `entity()` error when inspecting a provider data envelope. Converting raw JSON to
