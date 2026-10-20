@@ -46,13 +46,12 @@ changelog.
 
 Before the release PR, confirm the pre-merge items from `AGENTS.md`:
 
-1. Provider terms permit the intended source distribution and branding.
-2. Complete a secret and proprietary-content scan, including Git history
+1. Complete a secret and proprietary-content scan, including Git history
    (the `secret-scan` CI job runs Gitleaks over `--all`; see also
    `SECURITY.md` — no credentials, bearer tokens, captured account/order
    data, or provider payloads may ship).
-3. All fixtures are synthetic and all documentation is public-safe.
-4. The public API has been reviewed and the SemVer impact classified above.
+2. All fixtures are synthetic and all documentation is public-safe.
+3. The public API has been reviewed and the SemVer impact classified above.
 
 ## Release pull request
 

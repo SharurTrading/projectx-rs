@@ -248,13 +248,12 @@ guide and this section ever disagree, this section wins.
 
 Before merging a release pull request:
 
-1. Confirm provider terms permit the intended source distribution and branding.
-2. Complete a secret and proprietary-content scan, including Git history.
-3. Confirm all fixtures are synthetic and all documentation is public-safe.
-4. Review the public API against the compatibility policy and classify the Semantic Versioning
+1. Complete a secret and proprietary-content scan, including Git history.
+2. Confirm all fixtures are synthetic and all documentation is public-safe.
+3. Review the public API against the compatibility policy and classify the Semantic Versioning
    impact.
-5. Update the crate version, lockfile, changelog, and release-facing documentation in the same PR.
-6. Run formatting, strict Clippy, tests, rustdoc, package verification, dependency, license, and
+4. Update the crate version, lockfile, changelog, and release-facing documentation in the same PR.
+5. Run formatting, strict Clippy, tests, rustdoc, package verification, dependency, license, and
    secret checks; require the release PR and post-merge `main` CI runs to pass.
 
 After the release PR merges and `main` CI passes, publish that exact commit to crates.io, create an
