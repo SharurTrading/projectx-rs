@@ -31,7 +31,7 @@ impl RealtimeSession {
     pub async fn invoke(
         &self,
         target: impl Into<String>,
-        arguments: Vec<Value>,
+        arguments: &[Value],
     ) -> Result<(), RealtimeError> {
         self.send_invocation(target.into(), arguments).await
     }
@@ -127,7 +127,7 @@ impl RealtimeSession {
     /// Returns a real-time invocation error.
     pub async fn subscribe_accounts(&self) -> Result<(), RealtimeError> {
         self.ensure_hub(Hub::User)?;
-        self.send_invocation("SubscribeAccounts".to_owned(), Vec::new())
+        self.send_invocation("SubscribeAccounts".to_owned(), &[])
             .await
     }
 
@@ -138,7 +138,7 @@ impl RealtimeSession {
     /// Returns a real-time invocation error.
     pub async fn unsubscribe_accounts(&self) -> Result<(), RealtimeError> {
         self.ensure_hub(Hub::User)?;
-        self.send_invocation("UnsubscribeAccounts".to_owned(), Vec::new())
+        self.send_invocation("UnsubscribeAccounts".to_owned(), &[])
             .await
     }
 
@@ -222,7 +222,7 @@ impl RealtimeSession {
             .send_invocation(
                 Some(self.generation),
                 target.to_owned(),
-                vec![Value::String(contract.to_string())],
+                &[Value::String(contract.to_string())],
             )
             .await
     }
@@ -238,7 +238,7 @@ impl RealtimeSession {
             .send_invocation(
                 Some(self.generation),
                 target.to_owned(),
-                vec![Value::from(account.get())],
+                &[Value::from(account.get())],
             )
             .await
     }
@@ -246,7 +246,7 @@ impl RealtimeSession {
     async fn send_invocation(
         &self,
         target: String,
-        arguments: Vec<Value>,
+        arguments: &[Value],
     ) -> Result<(), RealtimeError> {
         self.inner
             .upgrade()

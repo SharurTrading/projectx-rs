@@ -7,7 +7,10 @@ use std::fmt;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::Error;
+use crate::{
+    Error,
+    error::{ConfigurationError, CredentialField},
+};
 
 /// Credentials accepted by one of the provider's authentication endpoints.
 pub(crate) enum AuthenticationCredentials {
@@ -42,14 +45,11 @@ impl Credentials {
     /// Returns [`Error::Configuration`] when either value is empty or padded
     /// with whitespace.
     pub fn new(user_name: impl Into<String>, api_key: impl Into<String>) -> Result<Self, Error> {
-        let user_name = user_name.into();
-        let api_key = api_key.into();
-        validate_secret("username", &user_name)?;
-        validate_secret("API key", &api_key)?;
-        Ok(Self {
-            user_name: SecretString::from(user_name),
-            api_key: SecretString::from(api_key),
-        })
+        let user_name = SecretString::from(user_name.into());
+        let api_key = SecretString::from(api_key.into());
+        validate_secret(CredentialField::UserName, user_name.expose_secret())?;
+        validate_secret(CredentialField::ApiKey, api_key.expose_secret())?;
+        Ok(Self { user_name, api_key })
     }
 
     pub(crate) fn expose_user_name(&self) -> &str {
@@ -167,20 +167,26 @@ impl ApplicationCredentialsBuilder {
     /// Returns [`Error::Configuration`] when a required value is missing,
     /// empty, or padded with whitespace.
     pub fn build(self) -> Result<ApplicationCredentials, Error> {
-        let device_id = self
-            .device_id
-            .ok_or_else(|| Error::Configuration("application device ID is required".to_owned()))?;
-        let app_id = self
-            .app_id
-            .ok_or_else(|| Error::Configuration("application identifier is required".to_owned()))?;
-        let verify_key = self.verify_key.ok_or_else(|| {
-            Error::Configuration("application verification key is required".to_owned())
+        let device_id = self.device_id.ok_or_else(|| {
+            Error::Configuration(ConfigurationError::MissingCredential(
+                CredentialField::DeviceId,
+            ))
         })?;
-        validate_secret("username", self.user_name.expose_secret())?;
-        validate_secret("password", self.password.expose_secret())?;
-        validate_secret("device ID", device_id.expose_secret())?;
-        validate_secret("application identifier", app_id.expose_secret())?;
-        validate_secret("verification key", verify_key.expose_secret())?;
+        let app_id = self.app_id.ok_or_else(|| {
+            Error::Configuration(ConfigurationError::MissingCredential(
+                CredentialField::AppId,
+            ))
+        })?;
+        let verify_key = self.verify_key.ok_or_else(|| {
+            Error::Configuration(ConfigurationError::MissingCredential(
+                CredentialField::VerifyKey,
+            ))
+        })?;
+        validate_secret(CredentialField::UserName, self.user_name.expose_secret())?;
+        validate_secret(CredentialField::Password, self.password.expose_secret())?;
+        validate_secret(CredentialField::DeviceId, device_id.expose_secret())?;
+        validate_secret(CredentialField::AppId, app_id.expose_secret())?;
+        validate_secret(CredentialField::VerifyKey, verify_key.expose_secret())?;
         Ok(ApplicationCredentials {
             user_name: self.user_name,
             password: self.password,
@@ -206,10 +212,10 @@ impl fmt::Debug for ApplicationCredentialsBuilder {
     }
 }
 
-fn validate_secret(name: &str, value: &str) -> Result<(), Error> {
+fn validate_secret(field: CredentialField, value: &str) -> Result<(), Error> {
     if value.is_empty() || value.trim() != value {
-        return Err(Error::Configuration(format!(
-            "{name} must be non-empty and must not contain surrounding whitespace"
+        return Err(Error::Configuration(ConfigurationError::InvalidCredential(
+            field,
         )));
     }
     Ok(())
@@ -242,21 +248,25 @@ mod tests {
     #[test]
     fn validate_secret_rejects_empty_and_padded_values() {
         assert!(matches!(
-            validate_secret("fixture", ""),
-            Err(Error::Configuration(_))
+            validate_secret(CredentialField::UserName, ""),
+            Err(Error::Configuration(ConfigurationError::InvalidCredential(
+                CredentialField::UserName
+            )))
         ));
         assert!(matches!(
-            validate_secret("fixture", " padded "),
+            validate_secret(CredentialField::UserName, " padded "),
             Err(Error::Configuration(_))
         ));
-        assert!(validate_secret("fixture", "valid-value").is_ok());
+        assert!(validate_secret(CredentialField::UserName, "valid-value").is_ok());
     }
 
     #[test]
     fn application_credentials_require_device_application_and_verification_fields() {
         assert!(matches!(
             ApplicationCredentials::builder(USER_NAME, PASSWORD).build(),
-            Err(Error::Configuration(_))
+            Err(Error::Configuration(ConfigurationError::MissingCredential(
+                CredentialField::DeviceId
+            )))
         ));
         assert!(matches!(
             ApplicationCredentials::builder(USER_NAME, PASSWORD)

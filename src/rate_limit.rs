@@ -11,7 +11,7 @@ use tokio::{
     time::{Instant, sleep},
 };
 
-use crate::Error;
+use crate::{Error, error::ConfigurationError};
 
 const DEFAULT_HISTORY_REQUESTS: usize = 50;
 const DEFAULT_HISTORY_WINDOW: Duration = Duration::from_secs(30);
@@ -70,9 +70,7 @@ impl RateLimit {
             || window.is_zero()
             || std::time::Instant::now().checked_add(window).is_none()
         {
-            return Err(Error::Configuration(
-                "rate limits require a positive request count and representable window".to_owned(),
-            ));
+            return Err(Error::Configuration(ConfigurationError::InvalidRateLimit));
         }
         Ok(Self {
             max_requests,
@@ -136,7 +134,7 @@ impl RateLimitConfig {
     pub fn with_exit_reserve(mut self, reserve: usize) -> Result<Self, Error> {
         if reserve >= self.general.max_requests {
             return Err(Error::Configuration(
-                "exit reserve must be smaller than the general request limit".to_owned(),
+                ConfigurationError::ExitReserveExhaustsCapacity,
             ));
         }
         self.exit_reserve = reserve;
@@ -207,12 +205,12 @@ impl RateLimits {
 
     pub(crate) fn set_exit_reserve(&self, reserve: usize) -> Result<(), Error> {
         let limiter = self.general.as_ref().ok_or_else(|| {
-            Error::Configuration("exit reserve requires enabled rate limits".to_owned())
+            Error::Configuration(ConfigurationError::ExitReserveRequiresRateLimits)
         })?;
         let mut state = limiter.state.lock();
         if reserve >= limiter.limit.max_requests {
             return Err(Error::Configuration(
-                "exit reserve must be smaller than the general request limit".to_owned(),
+                ConfigurationError::ExitReserveExhaustsCapacity,
             ));
         }
         let changed = state.exit_reserve != reserve;

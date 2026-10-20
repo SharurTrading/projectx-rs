@@ -10,7 +10,34 @@ first public release.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Resolve the Rust idiom audit in [#104](https://github.com/SharurTrading/projectx-rs/issues/104).
+  `SignalRInvocation::payload()` now returns exact `serde_json::value::RawValue`;
+  `entity()` returns `Result<&RawValue, RealtimeError>` so malformed data envelopes remain
+  explicit failures. Use `.get()` for JSON text or `decode` / `decode_batch` for exact provider
+  DTOs. The invocation retains one raw payload and no floating-point JSON tree.
+- `RealtimeClient::invoke` and `RealtimeSession::invoke` borrow `&[serde_json::Value]`.
+  Pass `&[]`, `&[value]`, or an existing vector's slice; pre-send refusal leaves arguments
+  available to the caller.
+- `Error::Configuration` carries `ConfigurationError` instead of a string. Configuration
+  causes and credential field identities are machine-readable and contain no supplied values.
+  `Error::ValidationAdmission` distinguishes closed or busy validator admission from a lost
+  authenticated session. These API changes require a major release.
+
+
 ### Fixed
+
+- Make receiver closure win over a pending transport gap, prevent relatching after receiver
+  loss, and refuse reconnect when the single receiver is gone. Spawn socket tasks only after
+  installation is admitted; preserve socket join failures in disconnect results. Remove unused
+  liveness writes, unreachable start-event retention, and estimated event-weight accounting.
+- Keep validator task ownership through shutdown cancellation; retain bearer tokens in
+  zeroizing secret storage through decoding, snapshots, stale authentication, and rotation.
+- Generate provider code conversions from one mapping per enum and serialize response
+  envelope maps through Serde while preserving raw decimal tokens. Link README examples to
+  compiled sources and correct example and fixture error handling. All audit resolutions are
+  tracked by [#104](https://github.com/SharurTrading/projectx-rs/issues/104).
 
 - Name the two exit reads where the crate's documentation still stated the general rule: the
   crate docs, the `Client` docs, and `ClientBuilder::max_retries` now say

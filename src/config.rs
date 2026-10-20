@@ -5,7 +5,7 @@
 
 use url::{Host, Url};
 
-use crate::Error;
+use crate::{Error, error::ConfigurationError};
 
 /// REST and real-time endpoints for one `ProjectX` deployment.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,13 +62,12 @@ impl Endpoints {
             "http" => "ws",
             _ => {
                 return Err(Error::Configuration(
-                    "real-time endpoint must use HTTP or HTTPS".to_owned(),
+                    ConfigurationError::InvalidEndpointBase,
                 ));
             }
         };
-        url.set_scheme(scheme).map_err(|()| {
-            Error::Configuration("real-time endpoint scheme could not be changed".to_owned())
-        })?;
+        url.set_scheme(scheme)
+            .map_err(|()| Error::Configuration(ConfigurationError::RealtimeEndpointScheme))?;
         url.join(&format!("hubs/{hub_path}")).map_err(Error::Url)
     }
 
@@ -102,13 +101,12 @@ fn parse_base(raw: &str) -> Result<String, Error> {
         || url.host_str().is_none()
     {
         return Err(Error::Configuration(
-            "endpoint must be an absolute HTTP(S) base URL with a host".to_owned(),
+            ConfigurationError::InvalidEndpointBase,
         ));
     }
     if url.scheme() == "http" && !has_loopback_host(&url) {
         return Err(Error::Configuration(
-            "remote endpoints must use HTTPS; plain HTTP is allowed only for loopback fixtures"
-                .to_owned(),
+            ConfigurationError::InsecureRemoteEndpoint,
         ));
     }
     if !url.username().is_empty()
@@ -117,7 +115,7 @@ fn parse_base(raw: &str) -> Result<String, Error> {
         || url.fragment().is_some()
     {
         return Err(Error::Configuration(
-            "endpoint base URL must not contain credentials, a query, or a fragment".to_owned(),
+            ConfigurationError::EndpointContainsSensitiveComponents,
         ));
     }
     if !url.path().ends_with('/') {
@@ -216,6 +214,27 @@ mod tests {
             assert!(Endpoints::custom(invalid, "https://example.test/").is_err());
             assert!(Endpoints::custom("https://example.test/", invalid).is_err());
         }
+    }
+
+    #[test]
+    fn endpoint_configuration_causes_are_typed_and_do_not_include_input() {
+        let error = Endpoints::custom(
+            "https://synthetic-user:synthetic-password@example.test/",
+            "https://example.test/",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("secret-bearing endpoint must be rejected"));
+        assert!(matches!(
+            error,
+            Error::Configuration(ConfigurationError::EndpointContainsSensitiveComponents)
+        ));
+        assert!(!format!("{error:?} {error}").contains("synthetic-password"));
+        assert!(matches!(
+            Endpoints::custom("http://remote.example.test/", "https://example.test/"),
+            Err(Error::Configuration(
+                ConfigurationError::InsecureRemoteEndpoint
+            ))
+        ));
     }
 
     #[test]

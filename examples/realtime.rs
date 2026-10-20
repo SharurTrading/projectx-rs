@@ -5,6 +5,10 @@
 
 use projectx_client::{Client, ContractId, Credentials, Hub, RealtimeEvent};
 
+#[derive(Debug, thiserror::Error)]
+#[error("the real-time event receiver was already claimed")]
+struct ReceiverAlreadyClaimed;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder(Credentials::new("user", "api-key")?).build()?;
@@ -13,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let realtime = client.realtime(Hub::Market);
     let mut events = realtime
         .take_event_receiver()
-        .ok_or_else(|| std::io::Error::other("event receiver was already claimed"))?;
+        .ok_or(ReceiverAlreadyClaimed)?;
     realtime.connect().await?;
 
     let contract = ContractId::new("CON.F.US.MNQ.M26")?;

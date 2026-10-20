@@ -85,11 +85,11 @@ impl AuthenticationAttempt {
     /// Concurrent successful authentications use first-completion-wins
     /// semantics. Every caller still observes success, but a delayed response
     /// can never replace a token already installed by another attempt.
-    pub(crate) fn commit(mut self, token: String) -> bool {
+    pub(crate) fn commit(mut self, token: SecretString) -> bool {
         let mut state = self.store.state.lock();
         let committed = state.revision == self.basis_revision;
         if committed {
-            state.token = Some(SecretString::from(token));
+            state.token = Some(token);
             state.revision = state.revision.wrapping_add(1);
             state.pending_update = None;
         }
@@ -147,25 +147,17 @@ impl TokenStore {
             return None;
         }
         state.token.as_ref().map(|token| TokenSnapshot {
-            token: SecretString::from(token.expose_secret().to_owned()),
+            token: token.clone(),
             revision: state.revision,
         })
     }
 
-    /// Returns an owned token for real-time connection setup.
-    pub(crate) fn snapshot(&self) -> Option<String> {
-        let state = self.state.lock();
-        if has_pending_update(&state) {
-            return None;
-        }
-        state
-            .token
-            .as_ref()
-            .map(|token| token.expose_secret().to_owned())
-    }
-
     /// Applies validation rotation only to the session that was validated.
-    pub(crate) fn rotate_if_current(&self, basis: &TokenSnapshot, token: String) -> UpdateOutcome {
+    pub(crate) fn rotate_if_current(
+        &self,
+        basis: &TokenSnapshot,
+        token: SecretString,
+    ) -> UpdateOutcome {
         let mut state = self.state.lock();
         if state.revision != basis.revision {
             return UpdateOutcome::Stale;
@@ -174,13 +166,13 @@ impl TokenStore {
             if state.pending_update.is_none() {
                 state.pending_update = Some(PendingUpdate::Rotate(PendingRotation {
                     basis_revision: basis.revision,
-                    token: SecretString::from(token),
+                    token,
                 }));
                 return UpdateOutcome::Deferred;
             }
             return UpdateOutcome::Stale;
         }
-        state.token = Some(SecretString::from(token));
+        state.token = Some(token);
         state.revision = state.revision.wrapping_add(1);
         UpdateOutcome::Applied
     }
@@ -267,9 +259,15 @@ mod tests {
         let delayed = store.begin_authentication();
         let completed_first = store.begin_authentication();
 
-        assert!(completed_first.commit("newer-token".to_owned()));
-        assert!(!delayed.commit("stale-token".to_owned()));
-        assert_eq!(store.snapshot().as_deref(), Some("newer-token"));
+        assert!(completed_first.commit(SecretString::from("newer-token")));
+        assert!(!delayed.commit(SecretString::from("stale-token")));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("newer-token")
+        );
     }
 
     #[test]
@@ -278,7 +276,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let validation = store
             .versioned_snapshot()
@@ -286,14 +284,20 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("reauthenticated-token".to_owned())
+                .commit(SecretString::from("reauthenticated-token"))
         );
 
         assert_eq!(
-            store.rotate_if_current(&validation, "stale-rotation".to_owned()),
+            store.rotate_if_current(&validation, SecretString::from("stale-rotation")),
             UpdateOutcome::Stale
         );
-        assert_eq!(store.snapshot().as_deref(), Some("reauthenticated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("reauthenticated-token")
+        );
     }
 
     #[test]
@@ -302,7 +306,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let delayed = store
             .versioned_snapshot()
@@ -312,14 +316,20 @@ mod tests {
             .unwrap_or_else(|| panic!("fixture token must exist"));
 
         assert_eq!(
-            store.rotate_if_current(&completed_first, "newer-token".to_owned()),
+            store.rotate_if_current(&completed_first, SecretString::from("newer-token")),
             UpdateOutcome::Applied
         );
         assert_eq!(
-            store.rotate_if_current(&delayed, "stale-token".to_owned()),
+            store.rotate_if_current(&delayed, SecretString::from("stale-token")),
             UpdateOutcome::Stale
         );
-        assert_eq!(store.snapshot().as_deref(), Some("newer-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("newer-token")
+        );
     }
 
     #[test]
@@ -328,7 +338,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let validation = store
             .versioned_snapshot()
@@ -337,10 +347,16 @@ mod tests {
         drop(cancelled);
 
         assert_eq!(
-            store.rotate_if_current(&validation, "rotated-token".to_owned()),
+            store.rotate_if_current(&validation, SecretString::from("rotated-token")),
             UpdateOutcome::Applied
         );
-        assert_eq!(store.snapshot().as_deref(), Some("rotated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("rotated-token")
+        );
     }
 
     #[test]
@@ -349,7 +365,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rejected = store
             .versioned_snapshot()
@@ -359,7 +375,7 @@ mod tests {
             store.invalidate_if_current(&rejected),
             UpdateOutcome::Applied
         );
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
         assert_eq!(store.invalidate_if_current(&rejected), UpdateOutcome::Stale);
     }
 
@@ -369,7 +385,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rejected = store
             .versioned_snapshot()
@@ -377,11 +393,17 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("reauthenticated-token".to_owned())
+                .commit(SecretString::from("reauthenticated-token"))
         );
 
         assert_eq!(store.invalidate_if_current(&rejected), UpdateOutcome::Stale);
-        assert_eq!(store.snapshot().as_deref(), Some("reauthenticated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("reauthenticated-token")
+        );
     }
 
     #[test]
@@ -390,7 +412,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rejected = store
             .versioned_snapshot()
@@ -401,10 +423,16 @@ mod tests {
             store.invalidate_if_current(&rejected),
             UpdateOutcome::Deferred
         );
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
         assert!(!store.is_authenticated());
-        assert!(reauthentication.commit("reauthenticated-token".to_owned()));
-        assert_eq!(store.snapshot().as_deref(), Some("reauthenticated-token"));
+        assert!(reauthentication.commit(SecretString::from("reauthenticated-token")));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("reauthenticated-token")
+        );
     }
 
     #[test]
@@ -413,7 +441,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rejected = store
             .versioned_snapshot()
@@ -424,10 +452,10 @@ mod tests {
             store.invalidate_if_current(&rejected),
             UpdateOutcome::Deferred
         );
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
         assert!(!store.is_authenticated());
         drop(cancelled);
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
     }
 
     #[test]
@@ -436,7 +464,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let validation = store
             .versioned_snapshot()
@@ -444,15 +472,21 @@ mod tests {
         let cancelled = store.begin_authentication();
 
         assert_eq!(
-            store.rotate_if_current(&validation, "rotated-token".to_owned()),
+            store.rotate_if_current(&validation, SecretString::from("rotated-token")),
             UpdateOutcome::Deferred
         );
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
         assert!(!store.is_authenticated());
         assert!(store.has_viable_session_or_authentication());
         drop(cancelled);
 
-        assert_eq!(store.snapshot().as_deref(), Some("rotated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("rotated-token")
+        );
         assert!(store.is_authenticated());
     }
 
@@ -462,7 +496,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rotation = store
             .versioned_snapshot()
@@ -473,7 +507,7 @@ mod tests {
         let cancelled = store.begin_authentication();
 
         assert_eq!(
-            store.rotate_if_current(&rotation, "rotated-token".to_owned()),
+            store.rotate_if_current(&rotation, SecretString::from("rotated-token")),
             UpdateOutcome::Deferred
         );
         assert_eq!(
@@ -482,7 +516,13 @@ mod tests {
         );
         drop(cancelled);
 
-        assert_eq!(store.snapshot().as_deref(), Some("rotated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("rotated-token")
+        );
     }
 
     #[test]
@@ -491,7 +531,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let rejection = store
             .versioned_snapshot()
@@ -506,12 +546,12 @@ mod tests {
             UpdateOutcome::Deferred
         );
         assert_eq!(
-            store.rotate_if_current(&rotation, "rotated-token".to_owned()),
+            store.rotate_if_current(&rotation, SecretString::from("rotated-token")),
             UpdateOutcome::Stale
         );
         drop(cancelled);
 
-        assert!(store.snapshot().is_none());
+        assert!(store.versioned_snapshot().is_none());
     }
 
     #[test]
@@ -520,7 +560,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("initial-token".to_owned())
+                .commit(SecretString::from("initial-token"))
         );
         let validation = store
             .versioned_snapshot()
@@ -528,12 +568,18 @@ mod tests {
         let reauthentication = store.begin_authentication();
 
         assert_eq!(
-            store.rotate_if_current(&validation, "rotated-token".to_owned()),
+            store.rotate_if_current(&validation, SecretString::from("rotated-token")),
             UpdateOutcome::Deferred
         );
-        assert!(reauthentication.commit("reauthenticated-token".to_owned()));
+        assert!(reauthentication.commit(SecretString::from("reauthenticated-token")));
 
-        assert_eq!(store.snapshot().as_deref(), Some("reauthenticated-token"));
+        assert_eq!(
+            store
+                .versioned_snapshot()
+                .as_ref()
+                .map(TokenSnapshot::expose),
+            Some("reauthenticated-token")
+        );
     }
 
     #[test]
@@ -542,7 +588,7 @@ mod tests {
         assert!(
             store
                 .begin_authentication()
-                .commit("synthetic-secret-token".to_owned())
+                .commit(SecretString::from("synthetic-secret-token"))
         );
         let snapshot = store
             .versioned_snapshot()
@@ -553,7 +599,7 @@ mod tests {
 
         let authentication = store.begin_authentication();
         assert_eq!(
-            store.rotate_if_current(&snapshot, "synthetic-deferred-secret".to_owned()),
+            store.rotate_if_current(&snapshot, SecretString::from("synthetic-deferred-secret")),
             UpdateOutcome::Deferred
         );
         assert!(!format!("{store:?}").contains("synthetic-deferred-secret"));

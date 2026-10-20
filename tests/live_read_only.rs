@@ -248,7 +248,12 @@ fn record_market_event(
         {
             match invocation.target() {
                 "GatewayQuote" => {
-                    let payload_shape = redacted_json_shape(invocation.entity());
+                    let entity = invocation
+                        .entity()
+                        .map_err(|error| format!("MNQ quote envelope failed to decode: {error}"))?;
+                    let value: serde_json::Value = serde_json::from_str(entity.get())
+                        .map_err(|error| format!("MNQ quote shape failed to decode: {error}"))?;
+                    let payload_shape = redacted_json_shape(&value);
                     for decoded in invocation.decode_batch::<MarketQuote>() {
                         let decoded = decoded.map_err(|error| {
                             let cause = error.source().map_or_else(

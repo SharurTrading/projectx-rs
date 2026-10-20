@@ -760,7 +760,7 @@ async fn close_timeout_always_clears_the_session() {
     ));
     assert!(!realtime.is_connected());
     assert!(matches!(
-        realtime.invoke("AfterClose", Vec::new()).await,
+        realtime.invoke("AfterClose", &[]).await,
         Err(RealtimeError::NotConnected)
     ));
     server.abort();
@@ -833,7 +833,7 @@ async fn cancelled_admitted_invocation_preserves_the_generation() {
         .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
     assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
     let invoking = realtime.clone();
-    let task = tokio::spawn(async move { invoking.invoke("Cancelled", Vec::new()).await });
+    let task = tokio::spawn(async move { invoking.invoke("Cancelled", &[]).await });
     seen_rx
         .await
         .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
@@ -843,7 +843,7 @@ async fn cancelled_admitted_invocation_preserves_the_generation() {
         realtime.is_connected(),
         "cancelling one invocation must preserve its socket"
     );
-    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.invoke("Healthy", &[]).await.is_ok());
     realtime
         .disconnect()
         .await
@@ -897,7 +897,7 @@ async fn exercise_invocation_deadline(deadline: Option<Duration>) {
         .unwrap_or_else(|error| panic!("fixture websocket must connect: {error}"));
     assert_eq!(events.recv().await, Some(RealtimeEvent::Connected));
     let invoking = realtime.clone();
-    let task = tokio::spawn(async move { invoking.invoke("NoCompletion", Vec::new()).await });
+    let task = tokio::spawn(async move { invoking.invoke("NoCompletion", &[]).await });
     seen_rx
         .await
         .unwrap_or_else(|error| panic!("invocation signal must arrive: {error}"));
@@ -919,7 +919,7 @@ async fn exercise_invocation_deadline(deadline: Option<Duration>) {
         "one completion deadline must preserve its socket"
     );
     tokio::time::resume();
-    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.invoke("Healthy", &[]).await.is_ok());
     realtime
         .disconnect()
         .await
@@ -1015,7 +1015,7 @@ async fn reader_failure_clears_the_writer_session() {
     ));
     assert!(!realtime.is_connected());
     assert!(matches!(
-        realtime.invoke("AfterReaderFailure", Vec::new()).await,
+        realtime.invoke("AfterReaderFailure", &[]).await,
         Err(RealtimeError::NotConnected)
     ));
     realtime
@@ -1474,7 +1474,7 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
         .unwrap_or_else(|e| panic!("session: {e}"));
     assert_eq!(session.generation(), first.generation);
     // Completion must pass even though a malformed record fenced data delivery.
-    assert!(session.invoke("Trigger", Vec::new()).await.is_ok());
+    assert!(session.invoke("Trigger", &[]).await.is_ok());
     for _ in 0..expected_prefix {
         let message = events
             .recv_message()
@@ -1488,7 +1488,7 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
     assert_eq!(gap.event, RealtimeEvent::TransportGap);
     assert!(realtime.is_connected());
     events.acknowledge_transport_gap();
-    assert!(session.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
     let after = events
         .recv_message()
         .await
@@ -1568,7 +1568,7 @@ async fn quiet_socket_survives_inactivity_watchdog_interval() {
             .generation(),
         generation
     );
-    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.invoke("Healthy", &[]).await.is_ok());
     assert!(realtime.disconnect().await.is_ok());
     server.await.unwrap_or_else(|e| panic!("server: {e}"));
 }
@@ -1695,10 +1695,10 @@ async fn failed_probe_reconnects_with_a_fresh_generation() {
     assert_eq!(replacement.event, RealtimeEvent::Reconnected);
     assert_ne!(replacement.generation, old.generation());
     assert!(matches!(
-        old.invoke("Stale", Vec::new()).await,
+        old.invoke("Stale", &[]).await,
         Err(RealtimeError::StaleGeneration)
     ));
-    assert!(realtime.invoke("Healthy", Vec::new()).await.is_ok());
+    assert!(realtime.invoke("Healthy", &[]).await.is_ok());
     assert!(realtime.disconnect().await.is_ok());
     server.await.unwrap_or_else(|e| panic!("server: {e}"));
 }
@@ -1776,7 +1776,7 @@ async fn exercise_large_burst(consume_immediately: bool) {
     let handle = realtime
         .session()
         .unwrap_or_else(|e| panic!("session: {e}"));
-    let mut completion = tokio::spawn(async move { handle.invoke("Burst", Vec::new()).await });
+    let mut completion = tokio::spawn(async move { handle.invoke("Burst", &[]).await });
     if !consume_immediately {
         // Deliberately pause the consumer until all records and completion arrived.
         assert!(matches!(

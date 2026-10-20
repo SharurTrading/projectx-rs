@@ -3,6 +3,8 @@
 
 //! Caller-configurable outbound control queues, never subscription quotas.
 
+use crate::error::ConfigurationError;
+
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
@@ -35,7 +37,7 @@ impl RealtimeConfig {
                 .is_none()
         {
             return Err(crate::Error::Configuration(
-                "real-time capacities must fit Tokio's non-zero permit range and the invocation deadline must fit its clock".to_owned(),
+                ConfigurationError::InvalidRealtimeLimits,
             ));
         }
         Ok(())

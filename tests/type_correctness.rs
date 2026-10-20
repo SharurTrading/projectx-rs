@@ -22,40 +22,90 @@ fn decimal(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap_or_else(|error| panic!("fixture decimal must parse: {error}"))
 }
 
+fn assert_wire_code<T>(value: &T, code: i32)
+where
+    T: std::fmt::Debug + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
+{
+    assert_eq!(
+        serde_json::to_value(value)
+            .unwrap_or_else(|error| panic!("provider code must encode: {error}")),
+        json!(code)
+    );
+    assert_eq!(
+        &serde_json::from_value::<T>(json!(code))
+            .unwrap_or_else(|error| panic!("provider code must decode: {error}")),
+        value
+    );
+}
+
 #[test]
 fn coded_enums_preserve_unknown_provider_codes() {
-    // A code this crate version does not know must round-trip exactly, so a
-    // future provider code is evidence, not a decode failure.
-    assert_eq!(Side::Unknown(99).code(), 99);
-    assert_eq!(OrderType::Unknown(99).code(), 99);
-    assert_eq!(OrderStatus::Unknown(99).code(), 99);
-    assert_eq!(TradeLogType::Unknown(99).code(), 99);
-    assert_eq!(PositionType::Unknown(99).code(), 99);
-    assert_eq!(DepthType::UnknownCode(99).code(), 99);
+    // Future provider codes remain evidence across the full signed wire range.
+    for code in [i32::MIN, -1, 99, i32::MAX] {
+        assert_eq!(Side::Unknown(code).code(), code);
+        assert_eq!(OrderType::Unknown(code).code(), code);
+        assert_eq!(OrderStatus::Unknown(code).code(), code);
+        assert_eq!(TradeLogType::Unknown(code).code(), code);
+        assert_eq!(PositionType::Unknown(code).code(), code);
+        assert_eq!(DepthType::UnknownCode(code).code(), code);
 
-    assert_eq!(
-        serde_json::from_value::<Side>(json!(99))
-            .unwrap_or_else(|error| panic!("unknown side code must decode: {error}")),
-        Side::Unknown(99)
-    );
-    assert_eq!(
-        serde_json::to_value(Side::Unknown(99))
-            .unwrap_or_else(|error| panic!("unknown side code must encode: {error}")),
-        json!(99)
-    );
-    assert_eq!(
-        serde_json::from_value::<DepthType>(json!(99))
-            .unwrap_or_else(|error| panic!("unknown depth code must decode: {error}")),
-        DepthType::UnknownCode(99)
-    );
+        assert_wire_code(&Side::Unknown(code), code);
+        assert_wire_code(&OrderType::Unknown(code), code);
+        assert_wire_code(&OrderStatus::Unknown(code), code);
+        assert_wire_code(&TradeLogType::Unknown(code), code);
+        assert_wire_code(&PositionType::Unknown(code), code);
+        assert_wire_code(&DepthType::UnknownCode(code), code);
+    }
+}
 
-    // Known codes keep their provider wire values.
-    assert_eq!(Side::Bid.code(), 0);
-    assert_eq!(Side::Ask.code(), 1);
-    assert_eq!(OrderType::Limit.code(), 1);
-    assert_eq!(OrderType::Market.code(), 2);
-    assert_eq!(OrderStatus::Open.code(), 1);
-    assert_eq!(OrderStatus::Suspended.code(), 8);
+#[test]
+fn coded_enums_keep_documented_provider_wire_values() {
+    macro_rules! assert_known_codes {
+        ($($variant:path => $code:literal),+ $(,)?) => {
+            $(
+                assert_eq!($variant.code(), $code);
+                assert_wire_code(&$variant, $code);
+            )+
+        };
+    }
+
+    assert_known_codes! {
+        Side::Bid => 0,
+        Side::Ask => 1,
+        OrderType::Limit => 1,
+        OrderType::Market => 2,
+        OrderType::StopLimit => 3,
+        OrderType::Stop => 4,
+        OrderType::TrailingStop => 5,
+        OrderType::JoinBid => 6,
+        OrderType::JoinAsk => 7,
+        OrderStatus::None => 0,
+        OrderStatus::Open => 1,
+        OrderStatus::Filled => 2,
+        OrderStatus::Cancelled => 3,
+        OrderStatus::Expired => 4,
+        OrderStatus::Rejected => 5,
+        OrderStatus::Pending => 6,
+        OrderStatus::PendingCancellation => 7,
+        OrderStatus::Suspended => 8,
+        TradeLogType::Buy => 0,
+        TradeLogType::Sell => 1,
+        PositionType::Undefined => 0,
+        PositionType::Long => 1,
+        PositionType::Short => 2,
+        DepthType::Unknown => 0,
+        DepthType::Ask => 1,
+        DepthType::Bid => 2,
+        DepthType::BestAsk => 3,
+        DepthType::BestBid => 4,
+        DepthType::Trade => 5,
+        DepthType::Reset => 6,
+        DepthType::Low => 7,
+        DepthType::High => 8,
+        DepthType::NewBestBid => 9,
+        DepthType::NewBestAsk => 10,
+        DepthType::Fill => 11,
+    }
 }
 
 #[test]
