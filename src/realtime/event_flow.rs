@@ -3,12 +3,24 @@
 
 //! Lossless data delivery with retained continuity and lifecycle boundaries.
 
-use std::{collections::VecDeque, time::Duration};
-
-use super::{
-    Arc, AtomicBool, Instant, Notify, Ordering, ParkingMutex, RealtimeError, RealtimeEvent, fmt,
-    mpsc,
+use std::{
+    collections::VecDeque,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
+
+use parking_lot::Mutex as ParkingMutex;
+use tokio::{
+    sync::{Notify, mpsc},
+    time::Instant,
+};
+
+use super::error::RealtimeError;
+use super::event::RealtimeEvent;
 
 /// Identity of one ready socket, scoped to its owning real-time client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
