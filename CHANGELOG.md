@@ -8,6 +8,22 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Changed
+
+- Update the `tokio` lockfile resolution from 1.53.3 to 1.54.1 through
+  [#111](https://github.com/SharurTrading/projectx-rs/pull/111).
+- Update `parking_lot` from 0.12.5 to 0.13.0, including its `lock_api` 0.5.0,
+  `parking_lot_core` 0.10.0 and `redox_syscall` 0.9.5 transitive resolutions, through
+  [#112](https://github.com/SharurTrading/projectx-rs/pull/112).
+- Update the `httpmock` dev-dependency from 0.8.3 to 0.9.0, which replaces its former
+  transitive test stack with a single `bstr` resolution, through
+  [#113](https://github.com/SharurTrading/projectx-rs/pull/113).
+- Refresh the CI action pins — `Swatinem/rust-cache` v2.9.2 to v2.9.3 and
+  `taiki-e/install-action` v2.87.28 to v2.87.30 — through
+  [#110](https://github.com/SharurTrading/projectx-rs/pull/110).
+
 ## [7.0.0] - 2026-10-20
 
 ### Breaking changes
