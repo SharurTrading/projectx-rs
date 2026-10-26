@@ -36,7 +36,7 @@ data-encoding = { version = "2.11.0", default-features = false, features = ["all
 futures-util = "0.3.33"
 httpdate = "1.0.3"
 jiff = { version = "0.2.35", default-features = false, features = ["serde", "std"] }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 rand = "0.10.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rust_decimal = "1.42.1"
