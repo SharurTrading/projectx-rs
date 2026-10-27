@@ -29,6 +29,8 @@ Every fact carries one of these labels:
 The recorded sessions ran on simulated practice accounts in October 2026,
 trading one or two micro index futures at a time. An observed fact shows
 that something can happen. It does not promise that it always happens.
+The dated 2026-10-26 observations below used `projectx-client` 7.0.0;
+they extend the earlier recordings rather than proving a complete history.
 
 ## Connection
 
@@ -174,6 +176,9 @@ in the window.
 - Observed: for pricing, a contract row gives only tick size and tick value.
 - Observed: every account row said `simulated: true`, evaluation accounts
   included. You cannot tell practice from evaluation by that flag.
+- Observed (2026-10-26): the raw `/api/Account/search` rows carried a
+  balance but no currency field. A currency chosen by an integration is not
+  a currency stated by that response.
 
 ### Bars and history
 
@@ -234,6 +239,21 @@ No row carries a sequence number. Use ids to match rows, not times.
 > the microsecond (see below), and in one reversal it stayed the same while
 > the side flipped. It cannot tell you how fresh the row is, or order it
 > against trades.
+
+Observed (practice, 2026-10-26, client 7.0.0): two user-hub rows for the
+same closing order carried exactly the same native `updateTimestamp`, but
+different state:
+
+| Arrival order | `status` | `fillVolume` |
+| --- | --- | --- |
+| First | 6 (`Pending`) | 0 |
+| Second | 2 (`Filled`) | 1 |
+
+Both arrived while one REST order query was in flight. An order's
+`updateTimestamp` is therefore not a unique revision or a safe deduplication
+key. Preserve arrival order and the full row. This sample does not establish
+which hub row a concurrent REST result reflects, or that taking the last
+arriving row resolves that ambiguity.
 
 Observed: precision varies by channel and by row.
 
