@@ -125,6 +125,10 @@ rows for the accounts you subscribe.
   refusal was the first sign, and a REST position read about 15 s after the
   first close showed it flat. The order and position reads after the
   reconnect all came back empty; no trade read was recorded.
+- Observed (practice, 2026-10-27, client 7.0.0): with both hub connections
+  cut and held down, `cancel_order` returned successfully for one unfilled
+  limit order. Separate open-order and position reads were empty before
+  reconnection was released.
 - Observed: after a reconnect, the trade that opened a lot can be pushed
   again when the lot closes (see [Fills](#fills-fees-and-pnl)).
 
