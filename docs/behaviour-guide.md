@@ -442,6 +442,13 @@ once.
 | Place an off-tick limit | Code 2, but an order is created |
 | Long bracket with a positive stop | Code 2, but an order is created |
 
+Observed (practice, 2026-10-27, client 7.0.0): MNQ and MES market orders
+returned code 2 `OrderRejected`: "Trading is currently unavailable. The
+instrument is not in an active trading status." The hub reported `Pending`
+then `Rejected`, with zero fill volume. The preceding contract rows had
+`activeContract: true`, and the account row had `canTrade: true`. Those flags
+did not establish that the venue would accept orders.
+
 The off-tick refusal also creates an order that the hub reports as
 `Rejected`. Its id never means a working order.
 
