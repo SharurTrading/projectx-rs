@@ -45,6 +45,12 @@ they extend the earlier recordings rather than proving a complete history.
 - Client: after HTTP 401 the token is unusable. The client does not log in
   again for you.
 
+Client: REST logout and realtime disconnection are separate operations.
+Await each owned hub's disconnect outcome and the REST logout outcome before
+treating a login as retired. A missing local token or `NotAuthenticated`
+alone is not a provider acknowledgement of logout; a refused or unconfirmed
+outcome remains unresolved.
+
 ### One REST budget for almost everything
 
 Documented, and enforced by the client:
@@ -147,6 +153,12 @@ orders, positions and trades over REST before you trust the account again.
 - Observed: two REST logins of the same user ran side by side for 90
   seconds without either being logged out.
 - Unverified: how long the venue keeps serving after `GatewayLogout`.
+
+Reported (configured practice setup, 2026-10-29): only one active login is
+permitted. Frontend and SDK sessions must therefore be sequential. The older
+concurrency observations above record what happened in those sessions; they
+do not establish permission for this setup or general support for concurrent
+applications.
 
 Our advice: treat the notice as final. Keep watching, allow only cancels
 and closes, and ask a person to reconnect.
@@ -274,9 +286,12 @@ Observed: precision varies by channel and by row.
 - A cut drops the digits past the sixth, it does not round, so the value
   itself changes, by up to 900 ns.
 
-Never require two times for one instant to be equal, as text or by value:
-cut both to the microsecond first. Prices also come with varying trailing
-zeros; compare decimals by value.
+Compare instants using the precision relation established for their sources.
+For the recorded REST/hub truncation, compare the higher-precision instant at
+the REST value's precision. Two decodings of the same original payload should
+retain the same exact instant; do not truncate every timestamp
+indiscriminately. Compare decimal prices by value rather than their trailing
+zeros.
 
 ## Execution
 
@@ -297,9 +312,10 @@ zeros; compare decimals by value.
   as a request value.
 - Documented: the OpenAPI spec lists type 3. Unverified: whether the venue
   accepts it.
-- Client: a trailing stop is placed with an absolute price. Order searches
-  report a distance in `trail_price`. Do not copy one into the other (see
-  the README).
+- Client: trailing placement and modification accept an absolute
+  `trail_price`; order reads expose a distance there. Request Decimal fields
+  serialize as JSON numbers. A quoted decimal in a decoded or re-encoded
+  representation does not change that request contract (see the README).
 - Unverified: join orders are placed without a price and rest at the best
   bid or ask. We have no recording of one.
 - Client: there is no time-in-force field. Every order is good till
@@ -500,6 +516,13 @@ send them no orders, and leave them out of your exit reserve. Their reads
 still use the shared REST budget.
 
 ## Wrapping the SDK
+
+Client: typed REST results retain the fields modelled by the SDK, not unknown
+response fields or original JSON formatting. Re-encoding a DTO is not raw
+HTTP capture. `ProviderList::Absent` combines omitted and null list fields.
+Realtime invocation payload and entity access retain their original JSON;
+decoding through `serde_json::Value` can lose numeric-token precision, so use
+raw-token typed decoding when that distinction matters.
 
 A short checklist from what we learned:
 
