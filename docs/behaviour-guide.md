@@ -45,6 +45,12 @@ they extend the earlier recordings rather than proving a complete history.
 - Client: after HTTP 401 the token is unusable. The client does not log in
   again for you.
 
+Client: REST logout and realtime disconnection are separate operations.
+Await each owned hub's disconnect outcome and the REST logout outcome before
+treating a login as retired. A missing local token or `NotAuthenticated`
+alone is not a provider acknowledgement of logout; a refused or unconfirmed
+outcome remains unresolved.
+
 ### One REST budget for almost everything
 
 Documented, and enforced by the client:
@@ -147,6 +153,12 @@ orders, positions and trades over REST before you trust the account again.
 - Observed: two REST logins of the same user ran side by side for 90
   seconds without either being logged out.
 - Unverified: how long the venue keeps serving after `GatewayLogout`.
+
+Reported (configured practice setup, 2026-10-29): only one active login is
+permitted. Frontend and SDK sessions must therefore be sequential. The older
+concurrency observations above record what happened in those sessions; they
+do not establish permission for this setup or general support for concurrent
+applications.
 
 Our advice: treat the notice as final. Keep watching, allow only cancels
 and closes, and ask a person to reconnect.
@@ -274,9 +286,18 @@ Observed: precision varies by channel and by row.
 - A cut drops the digits past the sixth, it does not round, so the value
   itself changes, by up to 900 ns.
 
-Never require two times for one instant to be equal, as text or by value:
-cut both to the microsecond first. Prices also come with varying trailing
-zeros; compare decimals by value.
+Compare instants using the precision relation established for their sources.
+For the recorded REST/hub truncation, compare the higher-precision instant at
+the REST value's precision. Two decodings of the same original payload should
+retain the same exact instant; do not truncate every timestamp
+indiscriminately. Compare decimal prices by value rather than their trailing
+zeros.
+
+Observed (practice, 2026-10-29): a filled order's history rows retained an
+`updateTimestamp` earlier than the associated execution's
+`creationTimestamp`. Order update time is not an execution watermark. Correlate
+by account, order identity, side, size and price; do not require the update
+time to be at or after the fill.
 
 ## Execution
 
@@ -288,20 +309,57 @@ zeros; compare decimals by value.
 | 2 | Market | Observed |
 | 3 | Stop-limit | Decoded only; see below |
 | 4 | Stop (stop-market) | Observed |
-| 5 | Trailing stop | Documented; not observed |
-| 6 | Join bid | Documented; not observed |
-| 7 | Join ask | Documented; not observed |
+| 5 | Trailing stop | Buy and Sell working orders and triggers observed |
+| 6 | Join bid | Request observed; returned as Limit, see below |
+| 7 | Join ask | Request observed; returned as Limit, see below |
+
+Reported (configured frontend, 2026-10-29): the operator found no trailing-stop
+entry, trailing-protection or stop-limit option. This report describes that
+frontend setup, not the API's supported request values.
+
+Observed (practice, 2026-10-29, raw REST readback): a frontend JoinBid buy and
+a frontend JoinAsk sell each returned an ordinary Limit order (`type: 1`).
+Their closing orders were Market (`type: 2`). The frontend labels therefore
+supply no observed native type-6 or type-7 order. No offline user-hub capture
+was made for these sequential frontend sessions. In those frontend sessions,
+types 3, 5, 6 and 7 were unobserved as returned native order types; this does not
+establish that the API does not offer those request values.
+
+Observed (practice, 2026-10-29): an SDK-authored Buy trailing stop was seen
+working as native type 5, with a positive distance and a changing stop price.
+It filled during a restart; the later SDK history read recovered that execution,
+and fresh order history retained type 5 with Filled status. No user-hub trade
+invocation was retained for that execution. The submitted absolute starting
+price, the venue's observed distance and its moving stop remain separate facts;
+neither readback term reconstructs the original instruction. The original Buy
+capture failed its working-order expectation; a separate exit closed the position.
+
+Observed (practice, 2026-10-29): a Sell trailing order remained working across a
+restart with a positive observed distance and a moving stop. It did not trigger
+within the original bound; that capture failed and the order was cancelled. A
+separate Sell order also showed a positive distance, then filled during cold startup.
+A later SDK history read recovered the execution and an explicit close flattened
+the position. The retained user-hub trade for the entry was an action-1 restatement
+after recovery, not an observed initial trade push. The reads do not recover an
+original HTTP body. Both sides have shown positive distances in these samples; they
+do not establish a universal distance formula or frontend availability.
 
 - Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
   and `Bracket::new` refuse it, because the placement docs do not list it
   as a request value.
 - Documented: the OpenAPI spec lists type 3. Unverified: whether the venue
   accepts it.
-- Client: a trailing stop is placed with an absolute price. Order searches
-  report a distance in `trail_price`. Do not copy one into the other (see
-  the README).
-- Unverified: join orders are placed without a price and rest at the best
-  bid or ask. We have no recording of one.
+- Client: trailing placement and modification accept an absolute
+  `trail_price`; order reads expose a distance there. Request Decimal fields
+  serialize as JSON numbers. A quoted decimal in a decoded or re-encoded
+  representation does not change that request contract (see the README).
+- Observed (practice, 2026-10-29): source-bound SDK Join Bid buy (`type: 6`)
+  and Join Ask sell (`type: 7`) requests, each quantity one with no authored
+  price, were accepted. Each returned order was an ordinary Limit (`type: 1`)
+  and filled with the same native order identity. The retained dispatch and
+  client writer establish the request values; the original HTTP request
+  bodies were not recorded. These are observations of conversion, not returned
+  type-6/type-7 rows or automatic repricing.
 - Client: there is no time-in-force field. Every order is good till
   cancelled.
 - Documented: modify changes only size and prices. It cannot change type,
@@ -414,14 +472,36 @@ Observed:
 - Observed: the close's untagged order row, its fill and the flat or reduced
   position can all arrive on the user hub before the REST answer.
 
+Observed (practice, 2026-10-29, client 7.0.0): six one-lot entries across MNQ
+and MES were followed by one three-lot close per contract. Trade search
+returned twelve distinct trade ids: six entry trades and six closing trades.
+Each closing order id was shared by three distinct one-lot trade ids. These
+were separate executions, not duplicate rows. The SDK-decoded rows retained
+each execution's quantity, fees and optional stated PnL. In this session,
+eight order-producing requests yielded twelve trades; request count was not
+execution count. This recording does not establish how every multi-lot close
+is split.
+
+Observed (practice, 2026-10-29, separate sequential frontend sessions): each
+three-lot Limit entry and each three-lot Market close returned one trade row
+with size three. Together with the split closes above, this shows that a
+three-lot order can be represented by one three-lot execution or by three
+one-lot executions in these samples. Neither grouping is a general venue
+guarantee.
+
 | Code | `close_contract` | `partial_close_contract` |
 | --- | --- | --- |
-| 1 `AccountNotFound`, 2 `PositionNotFound`, 3 `ContractNotFound`, 4 `ContractNotActive` | Refused | Refused |
-| 5 | `OrderRejected`, refused | `InvalidCloseSize`, refused, also for a size above the position |
+| 1 `AccountNotFound` | Refused | Refused |
+| 2 `PositionNotFound` | Refused | Refused |
+| 3 `ContractNotFound` | Refused | Refused |
+| 4 `ContractNotActive` | Refused | Refused |
+| 5 | `OrderRejected`, refused | `InvalidCloseSize`, refused |
 | 6 | `OrderPending`, ambiguous | `OrderRejected`, refused |
 | 7 | `UnknownError`, ambiguous | `OrderPending`, ambiguous |
 | 8 | `AccountRejected`, refused | `UnknownError`, ambiguous |
 | 9 | Undocumented, ambiguous | `AccountRejected`, refused |
+
+Partial-close code 5 also refuses a size above the position.
 
 Client: a refused code is `Error::Provider`; an ambiguous one is
 `Error::AmbiguousMutation`.
@@ -500,6 +580,13 @@ send them no orders, and leave them out of your exit reserve. Their reads
 still use the shared REST budget.
 
 ## Wrapping the SDK
+
+Client: typed REST results retain the fields modelled by the SDK, not unknown
+response fields or original JSON formatting. Re-encoding a DTO is not raw
+HTTP capture. `ProviderList::Absent` combines omitted and null list fields.
+Realtime invocation payload and entity access retain their original JSON;
+decoding through `serde_json::Value` can lose numeric-token precision, so use
+raw-token typed decoding when that distinction matters.
 
 A short checklist from what we learned:
 
