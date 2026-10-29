@@ -309,7 +309,7 @@ time to be at or after the fill.
 | 2 | Market | Observed |
 | 3 | Stop-limit | Decoded only; see below |
 | 4 | Stop (stop-market) | Observed |
-| 5 | Trailing stop | Buy working order and trigger observed; Sell unobserved |
+| 5 | Trailing stop | Buy and Sell working orders and triggers observed |
 | 6 | Join bid | Request observed; returned as Limit, see below |
 | 7 | Join ask | Request observed; returned as Limit, see below |
 
@@ -331,8 +331,18 @@ It filled during a restart; the later SDK history read recovered that execution,
 and fresh order history retained type 5 with Filled status. No user-hub trade
 invocation was retained for that execution. The submitted absolute starting
 price, the venue's observed distance and its moving stop remain separate facts;
-neither readback term reconstructs the original instruction. This observation
-does not establish the Sell distance sign or frontend availability.
+neither readback term reconstructs the original instruction. The original Buy
+capture failed its working-order expectation; a separate exit closed the position.
+
+Observed (practice, 2026-10-29): a Sell trailing order remained working across a
+restart with a positive observed distance and a moving stop. It did not trigger
+within the original bound; that capture failed and the order was cancelled. A
+separate Sell order also showed a positive distance, then filled during cold startup.
+A later SDK history read recovered the execution and an explicit close flattened
+the position. The retained user-hub trade for the entry was an action-1 restatement
+after recovery, not an observed initial trade push. The reads do not recover an
+original HTTP body. Both sides have shown positive distances in these samples; they
+do not establish a universal distance formula or frontend availability.
 
 - Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
   and `Bracket::new` refuse it, because the placement docs do not list it
