@@ -293,6 +293,12 @@ retain the same exact instant; do not truncate every timestamp
 indiscriminately. Compare decimal prices by value rather than their trailing
 zeros.
 
+Observed (practice, 2026-10-29): a filled order's history rows retained an
+`updateTimestamp` earlier than the associated execution's
+`creationTimestamp`. Order update time is not an execution watermark. Correlate
+by account, order identity, side, size and price; do not require the update
+time to be at or after the fill.
+
 ## Execution
 
 ### Order types
@@ -304,7 +310,7 @@ zeros.
 | 3 | Stop-limit | Decoded only; see below |
 | 4 | Stop (stop-market) | Observed |
 | 5 | Trailing stop | Documented; not observed |
-| 6 | Join bid | Documented; not observed |
+| 6 | Join bid | Request observed; returned as Limit, see below |
 | 7 | Join ask | Documented; not observed |
 
 Reported (configured frontend, 2026-10-29): the operator found no trailing-stop
@@ -316,8 +322,8 @@ a frontend JoinAsk sell each returned an ordinary Limit order (`type: 1`).
 Their closing orders were Market (`type: 2`). The frontend labels therefore
 supply no observed native type-6 or type-7 order. No offline user-hub capture
 was made for these sequential frontend sessions. Types 3, 5, 6 and 7 remain
-unobserved in the retained native payloads; this does not establish that the
-API does not offer them.
+unobserved as returned native order types; this does not establish that the
+API does not offer those request values.
 
 - Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
   and `Bracket::new` refuse it, because the placement docs do not list it
@@ -328,8 +334,12 @@ API does not offer them.
   `trail_price`; order reads expose a distance there. Request Decimal fields
   serialize as JSON numbers. A quoted decimal in a decoded or re-encoded
   representation does not change that request contract (see the README).
-- Unverified: join orders are placed without a price and rest at the best
-  bid or ask. We have no recording of one.
+- Observed (practice, 2026-10-29): a source-bound SDK Join Bid buy request
+  (`type: 6`, quantity one, no authored price) was accepted. The returned
+  order was an ordinary Limit (`type: 1`), and it filled. The retained dispatch
+  and client writer establish the request value; the original HTTP request
+  body was not recorded. This is evidence of conversion, not a returned
+  type-6 row or automatic repricing. A Join Ask API request remains unobserved.
 - Client: there is no time-in-force field. Every order is good till
   cancelled.
 - Documented: modify changes only size and prices. It cannot change type,
