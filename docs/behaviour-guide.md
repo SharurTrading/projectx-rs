@@ -307,6 +307,18 @@ zeros.
 | 6 | Join bid | Documented; not observed |
 | 7 | Join ask | Documented; not observed |
 
+Reported (configured frontend, 2026-10-29): the operator found no trailing-stop
+entry, trailing-protection or stop-limit option. This report describes that
+frontend setup, not the API's supported request values.
+
+Observed (practice, 2026-10-29, raw REST readback): a frontend JoinBid buy and
+a frontend JoinAsk sell each returned an ordinary Limit order (`type: 1`).
+Their closing orders were Market (`type: 2`). The frontend labels therefore
+supply no observed native type-6 or type-7 order. No offline user-hub capture
+was made for these sequential frontend sessions. Types 3, 5, 6 and 7 remain
+unobserved in the retained native payloads; this does not establish that the
+API does not offer them.
+
 - Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
   and `Bracket::new` refuse it, because the placement docs do not list it
   as a request value.
@@ -429,6 +441,23 @@ Observed:
   id. Match the close order by account, contract and time.
 - Observed: the close's untagged order row, its fill and the flat or reduced
   position can all arrive on the user hub before the REST answer.
+
+Observed (practice, 2026-10-29, client 7.0.0): six one-lot entries across MNQ
+and MES were followed by one three-lot close per contract. Trade search
+returned twelve distinct trade ids: six entry trades and six closing trades.
+Each closing order id was shared by three distinct one-lot trade ids. These
+were separate executions, not duplicate rows. The SDK-decoded rows retained
+each execution's quantity, fees and optional stated PnL. In this session,
+eight order-producing requests yielded twelve trades; request count was not
+execution count. This recording does not establish how every multi-lot close
+is split.
+
+Observed (practice, 2026-10-29, separate sequential frontend sessions): each
+three-lot Limit entry and each three-lot Market close returned one trade row
+with size three. Together with the split closes above, this shows that a
+three-lot order can be represented by one three-lot execution or by three
+one-lot executions in these samples. Neither grouping is a general venue
+guarantee.
 
 | Code | `close_contract` | `partial_close_contract` |
 | --- | --- | --- |
