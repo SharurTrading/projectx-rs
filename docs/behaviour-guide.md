@@ -309,9 +309,9 @@ time to be at or after the fill.
 | 2 | Market | Observed |
 | 3 | Stop-limit | Decoded only; see below |
 | 4 | Stop (stop-market) | Observed |
-| 5 | Trailing stop | Documented; not observed |
+| 5 | Trailing stop | Buy working order and trigger observed; Sell unobserved |
 | 6 | Join bid | Request observed; returned as Limit, see below |
-| 7 | Join ask | Documented; not observed |
+| 7 | Join ask | Request observed; returned as Limit, see below |
 
 Reported (configured frontend, 2026-10-29): the operator found no trailing-stop
 entry, trailing-protection or stop-limit option. This report describes that
@@ -321,9 +321,18 @@ Observed (practice, 2026-10-29, raw REST readback): a frontend JoinBid buy and
 a frontend JoinAsk sell each returned an ordinary Limit order (`type: 1`).
 Their closing orders were Market (`type: 2`). The frontend labels therefore
 supply no observed native type-6 or type-7 order. No offline user-hub capture
-was made for these sequential frontend sessions. Types 3, 5, 6 and 7 remain
-unobserved as returned native order types; this does not establish that the
-API does not offer those request values.
+was made for these sequential frontend sessions. In those frontend sessions,
+types 3, 5, 6 and 7 were unobserved as returned native order types; this does not
+establish that the API does not offer those request values.
+
+Observed (practice, 2026-10-29): an SDK-authored Buy trailing stop was seen
+working as native type 5, with a positive distance and a changing stop price.
+It filled during a restart; the later SDK history read recovered that execution,
+and fresh order history retained type 5 with Filled status. No user-hub trade
+invocation was retained for that execution. The submitted absolute starting
+price, the venue's observed distance and its moving stop remain separate facts;
+neither readback term reconstructs the original instruction. This observation
+does not establish the Sell distance sign or frontend availability.
 
 - Client: type 3 decodes when the venue reports one. `PlaceOrder::builder`
   and `Bracket::new` refuse it, because the placement docs do not list it
@@ -334,12 +343,13 @@ API does not offer those request values.
   `trail_price`; order reads expose a distance there. Request Decimal fields
   serialize as JSON numbers. A quoted decimal in a decoded or re-encoded
   representation does not change that request contract (see the README).
-- Observed (practice, 2026-10-29): a source-bound SDK Join Bid buy request
-  (`type: 6`, quantity one, no authored price) was accepted. The returned
-  order was an ordinary Limit (`type: 1`), and it filled. The retained dispatch
-  and client writer establish the request value; the original HTTP request
-  body was not recorded. This is evidence of conversion, not a returned
-  type-6 row or automatic repricing. A Join Ask API request remains unobserved.
+- Observed (practice, 2026-10-29): source-bound SDK Join Bid buy (`type: 6`)
+  and Join Ask sell (`type: 7`) requests, each quantity one with no authored
+  price, were accepted. Each returned order was an ordinary Limit (`type: 1`)
+  and filled with the same native order identity. The retained dispatch and
+  client writer establish the request values; the original HTTP request
+  bodies were not recorded. These are observations of conversion, not returned
+  type-6/type-7 rows or automatic repricing.
 - Client: there is no time-in-force field. Every order is good till
   cancelled.
 - Documented: modify changes only size and prices. It cannot change type,
