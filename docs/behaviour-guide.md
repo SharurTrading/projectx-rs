@@ -432,12 +432,17 @@ Observed:
 
 | Code | `close_contract` | `partial_close_contract` |
 | --- | --- | --- |
-| 1 `AccountNotFound`, 2 `PositionNotFound`, 3 `ContractNotFound`, 4 `ContractNotActive` | Refused | Refused |
-| 5 | `OrderRejected`, refused | `InvalidCloseSize`, refused, also for a size above the position |
+| 1 `AccountNotFound` | Refused | Refused |
+| 2 `PositionNotFound` | Refused | Refused |
+| 3 `ContractNotFound` | Refused | Refused |
+| 4 `ContractNotActive` | Refused | Refused |
+| 5 | `OrderRejected`, refused | `InvalidCloseSize`, refused |
 | 6 | `OrderPending`, ambiguous | `OrderRejected`, refused |
 | 7 | `UnknownError`, ambiguous | `OrderPending`, ambiguous |
 | 8 | `AccountRejected`, refused | `UnknownError`, ambiguous |
 | 9 | Undocumented, ambiguous | `AccountRejected`, refused |
+
+Partial-close code 5 also refuses a size above the position.
 
 Client: a refused code is `Error::Provider`; an ambiguous one is
 `Error::AmbiguousMutation`.
