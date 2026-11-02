@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             RealtimeEvent::TransportGap => {
                 // Mark downstream state stale and start snapshot/reconciliation.
-                // Only after that recovery fence is installed may reconnect resume.
-                events.acknowledge_transport_gap();
+                // The next event retains its place after this loss notification.
+                tracing::warn!("real-time continuity lost; application recovery required");
             }
             _ => {}
         }

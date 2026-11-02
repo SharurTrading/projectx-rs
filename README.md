@@ -28,25 +28,29 @@ This README documents the additional safety and lifecycle behavior supplied by t
 
 The minimum supported Rust version is 1.95.0.
 
-Version 7 follows Semantic Versioning. Public API changes that require downstream source changes
-will be released under a new major version; additive APIs and fixes use minor and patch releases.
+This README describes the Git `main` API, prepared as version 8.0.0 and not published to crates.io.
+The current registry release is 7.0.2; the registry and docs.rs badges above refer to that release.
+Public API changes that require downstream source changes use a new major version; additive APIs
+and fixes use minor and patch versions.
 Provider contract changes can still require callers to update operational behavior, so review the
 changelog before upgrading and keep recovery around ambiguous money-moving outcomes.
 
 ## Installation
 
 ```sh
-cargo add projectx-client@7
+cargo add projectx-client --git https://github.com/SharurTrading/projectx-rs --branch main
 ```
 
-Or add the current major release directly:
+Or depend on the same Git source directly:
 
 ```toml
 [dependencies]
-projectx-client = "7"
+projectx-client = { git = "https://github.com/SharurTrading/projectx-rs", branch = "main" }
 ```
 
-The complete public API is available on [docs.rs](https://docs.rs/projectx-client).
+Pin a reviewed commit with `rev` instead of `branch` for reproducible builds. Generate documentation
+for the Git API with `cargo doc --open`; [docs.rs](https://docs.rs/projectx-client/7.0.2/projectx_client/)
+documents the published 7.0.2 API.
 
 ## Design boundaries
 
@@ -268,35 +272,41 @@ Do not blindly retry an uncertain mutation or infer that an uncertain subscripti
 
 SignalR control traffic remains internal. The client sends a type-6 keepalive after 15 seconds
 without an outbound frame and continues processing provider keepalives and invocation completions
-while application event delivery is fenced. A valid provider close ends the active generation;
+across malformed application records. A valid provider close ends the active generation;
 the caller’s Connect instruction remains active across remote closure. Only explicit Disconnect
 or dropping the owner cancels recovery. WebSocket probes run every 15 seconds; an unanswered probe
 for 15 seconds ends that failed socket. Ordinary application-data silence has no deadline.
 
-### Transport gaps and `acknowledge_transport_gap`
+### Ordered transport gaps
 
 Real-time event delivery retains every accepted event without a fixed queue limit. On the market
 hub, a malformed SignalR record — invalid JSON, a missing or invalid contract argument, a wrong
 argument list, an empty record, or a record missing its terminator — is skipped and logged through
-`tracing` and never gates delivery: records before and after it still arrive, no gap is raised, and
-no chart needs reloading because of one bad row. On the user hub the 7.0.0 contract stands: the
-same malformed record latches a `TransportGap`, because a silently skipped row there could lose an
-order, position, or execution update; the long-term user-hub contract is an open investigation
-with the operator. Otherwise `TransportGap` marks transport-level loss of an unknown number of
-records — a binary frame that is not valid UTF-8. That gap reaches the consumer without waiting
-for disconnection; later application data is discarded with that explicit signal until the
-consumer installs its recovery boundary and calls `acknowledge_transport_gap()`. Valid invocation
-completions and keepalives continue throughout a gap.
+`tracing`. Records before and after it still arrive, and no gap is raised. On the user hub the
+same malformed record emits a `TransportGap`, because a silently skipped row there could lose an
+order, position, or execution update. A binary frame that is not valid UTF-8 emits a gap on either
+hub, since the frame may contain an unknown number of records.
 
-Gap acknowledgement resumes data admission on the same socket. It never requests a reconnect.
-If the socket actually ends during the gap, its lifecycle boundary is retained separately from the
-data queue and attributed to the old generation; a replacement cannot overtake that retained tail.
-An affected application projection must reconcile or obtain a fresh snapshot before claiming
-continuity. A continuity gap alone does not prove physical subscriptions ended.
-`RealtimeEventReceiver::queued_event_count()` and `oldest_event_age()` expose local consumer lag;
-backlog age alone never creates a gap. The provider's SignalR messages do not establish a complete
-source sequence, so a consumer still needs its own replay or snapshot policy when continuity cannot
-be proved.
+Every observed loss occupies one ordinary FIFO queue position. For input A, malformed record,
+B, malformed record, C, the user receiver sees A, `TransportGap`, B, `TransportGap`, C, even when
+it was not being polled while the entire batch arrived. Later input on the same socket remains
+available. Invocation completions and keepalives continue throughout. A consumer chooses its own
+reconciliation or snapshot policy when it reaches a gap before claiming continuity; no
+acknowledgment or reconnect is required by the SDK, and a gap does not prove subscriptions ended.
+
+An actual socket failure ends the generation. `Disconnected` follows every accepted event and both
+socket-task joins, and a replacement generation's `Reconnected` cannot overtake that terminal.
+`RealtimeEventReceiver::queued_event_count()` counts all queued data, gap and lifecycle envelopes;
+`oldest_event_age()` measures the oldest of them. Local backlog never creates a gap. The provider's
+SignalR messages do not establish a complete source sequence, so consumers still need their own
+replay or snapshot policy when continuity cannot be proved.
+
+### Migrating from 7.x
+
+Remove calls to `RealtimeEventReceiver::acknowledge_transport_gap()` and matches on
+`RealtimeError::TransportGapPending`. Handle `TransportGap` in source order and apply your own
+recovery policy while retaining valid later records. A finite drain uses the captured
+`queued_event_count()` directly: gap and lifecycle notifications are included in that count.
 
 ### Migrating from 5.x
 

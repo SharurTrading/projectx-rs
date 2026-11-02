@@ -8,6 +8,26 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [8.0.0] - Not published
+
+### Breaking changes
+
+- Remove `RealtimeEventReceiver::acknowledge_transport_gap()` and
+  `RealtimeError::TransportGapPending`. Each observed loss now queues one ordinary
+  source-ordered `TransportGap` notification. Valid records after it remain available, including
+  records in the same frame and records arriving while the consumer is stalled. Consumers choose
+  their own snapshot or reconciliation boundary when they reach the notification
+  ([#127](https://github.com/SharurTrading/projectx-rs/issues/127)).
+- `queued_event_count()` includes every queued data, gap and lifecycle envelope. Finite consumers
+  use that captured count directly. Gap notifications no longer gate connection attempts or
+  automatic transport recovery. `Disconnected` still follows both socket-task joins and precedes
+  the replacement generation's `Reconnected`
+  ([#127](https://github.com/SharurTrading/projectx-rs/issues/127)).
+
+The inbound queue remains unbounded; local backlog creates no gap. Malformed user-hub records
+still report loss, malformed market-hub records still skip and log, and undecodable binary
+frames still report loss on either hub. No live-provider completeness guarantee is added.
+
 ## [7.0.2] - 2026-11-02
 
 ### Fixed
@@ -503,6 +523,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[8.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.2...main
 [7.0.2]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.1...v7.0.2
 [7.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.0...v7.0.1
 [7.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.2.0...v7.0.0

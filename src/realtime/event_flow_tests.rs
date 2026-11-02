@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Kevin Monaghan
 // SPDX-License-Identifier: MIT-0
 
-//! Unit tests for event-flow publication, gap fencing, and receiver retention.
+//! Unit tests for event-flow publication, loss notifications, and receiver retention.
 
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::error::RealtimeError;
@@ -17,71 +17,61 @@ use super::event_flow::{
 use super::socket::send_queued;
 
 #[tokio::test]
-async fn gap_follows_accepted_events_without_waiting_for_generation_end() {
+async fn held_receiver_retains_each_loss_data_and_lifecycle_in_source_order() {
     let flow = EventFlow::new();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let mut receiver = RealtimeEventReceiver {
         events: events_rx,
         flow: Arc::clone(&flow),
-        gap_reported: false,
     };
-    let generation = 7;
-    flow.start_generation(generation)
+    flow.start_generation(7)
         .unwrap_or_else(|error| panic!("generation must start: {error}"));
-    flow.publish(
-        &events_tx,
-        generation,
-        RealtimeEvent::Message(json!({"sequence": 1})),
-    )
-    .unwrap_or_else(|error| panic!("first event must enter the queue: {error}"));
-
-    let (terminal_staged_tx, terminal_staged_rx) = oneshot::channel();
-    let (finish_tx, finish_rx) = oneshot::channel();
-    let producer_flow = Arc::clone(&flow);
-    let producer = tokio::spawn(async move {
-        producer_flow.mark_gap(generation);
-        producer_flow
-            .publish(&events_tx, generation, RealtimeEvent::Disconnected)
-            .unwrap_or_else(|error| panic!("terminal event must be staged: {error}"));
-        terminal_staged_tx
-            .send(())
-            .unwrap_or_else(|()| panic!("terminal-staged signal must send"));
-        finish_rx
-            .await
-            .unwrap_or_else(|error| panic!("finish signal must arrive: {error}"));
-        producer_flow.finish_generation(generation);
-    });
-
-    assert_eq!(
-        receiver.recv().await,
-        Some(RealtimeEvent::Message(json!({"sequence": 1})))
-    );
-    terminal_staged_rx
-        .await
-        .unwrap_or_else(|error| panic!("terminal-staged signal must arrive: {error}"));
-    assert_eq!(receiver.recv().await, Some(RealtimeEvent::TransportGap));
-    receiver.acknowledge_transport_gap();
-    finish_tx
-        .send(())
-        .unwrap_or_else(|()| panic!("finish signal must send"));
-    producer
-        .await
-        .unwrap_or_else(|error| panic!("producer must join: {error}"));
-
-    assert_eq!(receiver.recv().await, Some(RealtimeEvent::Disconnected));
-    flow.start_generation(generation + 1)
-        .unwrap_or_else(|error| panic!("acknowledgement must allow the next generation: {error}"));
+    let expected = [
+        RealtimeEvent::Connected,
+        RealtimeEvent::Message(json!({"sequence": "A"})),
+        RealtimeEvent::TransportGap,
+        RealtimeEvent::Message(json!({"sequence": "B"})),
+        RealtimeEvent::TransportGap,
+        RealtimeEvent::Message(json!({"sequence": "C"})),
+        RealtimeEvent::Disconnected,
+    ];
+    for event in &expected {
+        assert_eq!(
+            flow.publish(&events_tx, 7, event.clone())
+                .unwrap_or_else(|error| panic!("event must publish: {error}")),
+            PublishOutcome::Published
+        );
+    }
+    flow.finish_generation(7);
+    flow.start_generation(8)
+        .unwrap_or_else(|error| panic!("next generation must start: {error}"));
+    flow.publish(&events_tx, 8, RealtimeEvent::Reconnected)
+        .unwrap_or_else(|error| panic!("replacement must publish: {error}"));
+    assert_eq!(receiver.queued_event_count(), 8);
+    for (index, event) in expected.into_iter().enumerate() {
+        assert_eq!(receiver.queued_event_count(), 8 - index);
+        assert_eq!(
+            receiver.recv_message().await,
+            Some(RealtimeMessage {
+                generation: RealtimeGeneration(7),
+                event,
+            })
+        );
+    }
+    assert_eq!(receiver.recv().await, Some(RealtimeEvent::Reconnected));
+    assert_eq!(receiver.queued_event_count(), 0);
+    assert_eq!(receiver.oldest_event_age(), None);
+    drop(events_tx);
     assert_eq!(receiver.recv().await, None);
 }
 
 #[tokio::test]
-async fn stale_generation_cannot_publish_or_latch_a_gap_after_replacement() {
+async fn replacement_stream_preserves_its_identity_when_old_producers_publish() {
     let flow = EventFlow::new();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let mut receiver = RealtimeEventReceiver {
         events: events_rx,
         flow: Arc::clone(&flow),
-        gap_reported: false,
     };
 
     flow.start_generation(1)
@@ -113,7 +103,11 @@ async fn stale_generation_cannot_publish_or_latch_a_gap_after_replacement() {
         .unwrap_or_else(|error| panic!("stale publication must be ignored: {error}")),
         PublishOutcome::StaleGeneration
     );
-    assert!(!flow.has_unacknowledged_gap());
+    assert_eq!(
+        flow.publish(&events_tx, 1, RealtimeEvent::TransportGap)
+            .unwrap_or_else(|error| panic!("stale loss must be ignored: {error}")),
+        PublishOutcome::StaleGeneration
+    );
     assert_eq!(
         flow.publish(
             &events_tx,
@@ -143,7 +137,6 @@ async fn stalled_receiver_retains_more_than_the_former_event_limit_across_genera
     let mut receiver = RealtimeEventReceiver {
         events: events_rx,
         flow: Arc::clone(&flow),
-        gap_reported: false,
     };
     flow.start_generation(1)
         .unwrap_or_else(|error| panic!("first generation must start: {error}"));
@@ -160,7 +153,6 @@ async fn stalled_receiver_retains_more_than_the_former_event_limit_across_genera
     }
     assert_eq!(receiver.queued_event_count(), BURST);
     assert!(receiver.oldest_event_age().is_some());
-    assert!(!flow.has_unacknowledged_gap());
 
     assert!(matches!(
         flow.publish(&events_tx, 1, RealtimeEvent::Disconnected),
@@ -224,7 +216,6 @@ async fn outbound_saturation_does_not_discard_inbound_events() {
     let mut receiver = RealtimeEventReceiver {
         events: events_rx,
         flow: Arc::clone(&flow),
-        gap_reported: false,
     };
     flow.start_generation(1)
         .unwrap_or_else(|error| panic!("generation must start: {error}"));
@@ -240,7 +231,6 @@ async fn outbound_saturation_does_not_discard_inbound_events() {
         receiver.recv().await,
         Some(RealtimeEvent::Message(json!({"order": "terminal"})))
     );
-    assert!(!flow.has_unacknowledged_gap());
 }
 
 #[test]
@@ -250,7 +240,6 @@ fn dropping_event_receiver_refuses_new_data() {
     let receiver = RealtimeEventReceiver {
         events: events_rx,
         flow: Arc::clone(&flow),
-        gap_reported: false,
     };
     flow.start_generation(1)
         .unwrap_or_else(|error| panic!("generation must start: {error}"));

@@ -972,7 +972,7 @@ async fn dropping_last_client_handle_closes_the_transport() {
 }
 
 #[tokio::test]
-async fn reader_failure_clears_the_writer_session() {
+async fn reader_failure_orders_the_valid_suffix_before_the_terminal_boundary() {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -990,11 +990,22 @@ async fn reader_failure_clears_the_writer_session() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = accept_socket(&listener).await;
         complete_handshake(&mut socket).await;
+        socket
+            .send(Message::Text(
+                format!(
+                    "{}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}",
+                    json!({"type":42,"sequence":"before"}),
+                    json!({"type":42,"sequence":"after"}),
+                )
+                .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("fixture records must send: {error}"));
     });
 
     let client = fixture_client(&http, address);
     authenticate_fixture(&client).await;
-    let realtime = client.realtime(Hub::Market);
+    let realtime = client.realtime(Hub::User);
     let mut events = realtime
         .take_event_receiver()
         .unwrap_or_else(|| panic!("event receiver must be available"));
@@ -1009,10 +1020,17 @@ async fn reader_failure_clears_the_writer_session() {
     server
         .await
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
-        Ok(Some(RealtimeEvent::Disconnected))
-    ));
+    for expected in [
+        RealtimeEvent::Message(json!({"type":42,"sequence":"before"})),
+        RealtimeEvent::TransportGap,
+        RealtimeEvent::Message(json!({"type":42,"sequence":"after"})),
+        RealtimeEvent::Disconnected,
+    ] {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), events.recv()).await,
+            Ok(Some(expected))
+        );
+    }
     assert!(!realtime.is_connected());
     assert!(matches!(
         realtime.invoke("AfterReaderFailure", &[]).await,
@@ -1492,8 +1510,7 @@ async fn exercise_malformed_records_skipped(records: String, expected_records: u
             sequence += 1;
         }
     }
-    // No gap was latched: the next pushed record is delivered without any
-    // acknowledge_transport_gap call.
+    // Later input remains available on the same connection.
     assert!(realtime.is_connected());
     assert!(session.invoke("Healthy", &[]).await.is_ok());
     let after = events
@@ -1662,9 +1679,8 @@ async fn unterminated_trailing_record_is_dropped_without_a_gap() {
 }
 
 #[tokio::test]
-async fn undecodable_binary_frame_reports_transport_gap_until_acknowledged() {
-    // Transport-level loss keeps its fencing gap: a binary frame that is not
-    // valid UTF-8 loses an unknown number of records.
+async fn undecodable_binary_frame_preserves_later_data_after_transport_gap() {
+    // Invalid UTF-8 loses an unknown number of records on either hub.
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -1733,15 +1749,14 @@ async fn undecodable_binary_frame_reports_transport_gap_until_acknowledged() {
         .session()
         .unwrap_or_else(|e| panic!("session: {e}"));
     assert_eq!(session.generation(), first.generation);
-    // The invocation completion still resolves even though the binary frame
-    // latched a gap.
+    // Completion confirms that loss and later input arrived while held.
     assert!(session.invoke("Trigger", &[]).await.is_ok());
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    assert_eq!(events.queued_event_count(), 2);
     let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
     assert_eq!(gap.generation, first.generation);
     assert_eq!(gap.event, RealtimeEvent::TransportGap);
     assert!(realtime.is_connected());
-    events.acknowledge_transport_gap();
-    assert!(session.invoke("Healthy", &[]).await.is_ok());
     let after = events
         .recv_message()
         .await
@@ -2158,7 +2173,10 @@ fn invalid_realtime_queue_and_deadline_settings_fail_before_runtime_construction
     }
 }
 
-async fn exercise_malformed_record_gaps_on_the_user_hub(records: String, expected_prefix: usize) {
+async fn exercise_malformed_record_gaps_on_the_user_hub(
+    records: String,
+    expected: &[RealtimeEvent],
+) {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -2224,22 +2242,17 @@ async fn exercise_malformed_record_gaps_on_the_user_hub(records: String, expecte
         .unwrap_or_else(|e| panic!("session: {e}"));
     assert_eq!(session.generation(), first.generation);
     assert!(session.invoke("Trigger", &[]).await.is_ok());
-    for _ in 0..expected_prefix {
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    assert_eq!(events.queued_event_count(), expected.len() + 1);
+    for expected_event in expected {
         let message = events
             .recv_message()
             .await
-            .unwrap_or_else(|| panic!("prefix"));
+            .unwrap_or_else(|| panic!("record around a malformed user record"));
         assert_eq!(message.generation, first.generation);
-        assert!(matches!(message.event, RealtimeEvent::Message(_)));
+        assert_eq!(&message.event, expected_event);
     }
-    // The restored 7.0.0 user-hub contract: the malformed record latches a
-    // gap instead of being skipped silently.
-    let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
-    assert_eq!(gap.generation, first.generation);
-    assert_eq!(gap.event, RealtimeEvent::TransportGap);
     assert!(realtime.is_connected());
-    events.acknowledge_transport_gap();
-    assert!(session.invoke("Healthy", &[]).await.is_ok());
     let after = events
         .recv_message()
         .await
@@ -2255,19 +2268,24 @@ async fn exercise_malformed_record_gaps_on_the_user_hub(records: String, expecte
 }
 
 #[tokio::test]
-async fn malformed_record_latches_a_gap_on_the_user_hub_but_not_the_market_hub() {
+async fn malformed_record_reports_user_loss_and_preserves_both_hubs_suffix() {
     let broken_batch = format!(
         "{}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}",
         json!({"type":42,"sequence":"before"}),
         json!({"type":42,"sequence":"after"}),
     );
-    // Market hub: SharurMinus#1180 — one bad row is skipped and logged, and
-    // records after it still arrive.
+    // The market hub skips the bad row and retains both neighbors.
     exercise_malformed_records_skipped(broken_batch.clone(), 2).await;
-    // User hub: the restored 7.0.0 contract — the same batch latches a gap,
-    // because a silently skipped account row could lose a fill; SharurMinus
-    // #1193 decides the long-term answer.
-    exercise_malformed_record_gaps_on_the_user_hub(broken_batch, 1).await;
+    // A skipped account row remains explicit between its neighboring records.
+    exercise_malformed_record_gaps_on_the_user_hub(
+        broken_batch,
+        &[
+            RealtimeEvent::Message(json!({"type":42,"sequence":"before"})),
+            RealtimeEvent::TransportGap,
+            RealtimeEvent::Message(json!({"type":42,"sequence":"after"})),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2353,14 +2371,11 @@ async fn unterminated_trailing_record_latches_a_gap_on_the_user_hub() {
         before.event,
         RealtimeEvent::Message(json!({"type":42,"sequence":"before"}))
     );
-    // The unterminated tail latches the restored 7.0.0 user-hub gap; the
-    // Healthy completion still resolves while the fence holds.
+    // Wait for later input before consuming the ordered loss notification.
     assert!(session.invoke("Healthy", &[]).await.is_ok());
     let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
     assert_eq!(gap.generation, first.generation);
     assert_eq!(gap.event, RealtimeEvent::TransportGap);
-    events.acknowledge_transport_gap();
-    assert!(session.invoke("Healthy", &[]).await.is_ok());
     let after = events
         .recv_message()
         .await
@@ -2373,4 +2388,25 @@ async fn unterminated_trailing_record_latches_a_gap_on_the_user_hub() {
     assert!(realtime.disconnect().await.is_ok());
     assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
     server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn held_user_receiver_preserves_each_loss_and_the_valid_suffix() {
+    let records = format!(
+        "{}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}",
+        json!({"type":42,"sequence":"A"}),
+        json!({"type":42,"sequence":"B"}),
+        json!({"type":42,"sequence":"C"}),
+    );
+    exercise_malformed_record_gaps_on_the_user_hub(
+        records,
+        &[
+            RealtimeEvent::Message(json!({"type":42,"sequence":"A"})),
+            RealtimeEvent::TransportGap,
+            RealtimeEvent::Message(json!({"type":42,"sequence":"B"})),
+            RealtimeEvent::TransportGap,
+            RealtimeEvent::Message(json!({"type":42,"sequence":"C"})),
+        ],
+    )
+    .await;
 }
