@@ -10,6 +10,17 @@ first public release.
 
 ## [Unreleased]
 
+### Fixed
+
+- Skip and log one malformed real-time record — invalid JSON, a missing or invalid contract
+  argument, a wrong argument list, an empty record, or a record missing its terminator — without
+  latching a `TransportGap`, so records after it are no longer fenced away and one bad row can no
+  longer clear every consumer projection
+  ([#120](https://github.com/SharurTrading/projectx-rs/issues/120), the client side of
+  [SharurMinus#1180](https://github.com/SharurTrading/SharurMinus/issues/1180)). `TransportGap`
+  is now reserved for transport-level loss of an unknown number of records, which keeps its
+  fencing and `acknowledge_transport_gap()` semantics.
+
 ### Changed
 
 - Update the `tokio` lockfile resolution from 1.53.3 to 1.54.1 through

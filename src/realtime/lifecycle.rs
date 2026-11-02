@@ -705,15 +705,23 @@ impl RealtimeInner {
             }
             if records.peek().is_none() {
                 if !frame.is_empty() {
-                    self.event_flow.mark_gap(generation);
+                    // A record is only accepted with its terminator; a trailing
+                    // fragment is dropped and logged, never gated on.
+                    tracing::warn!(
+                        hub = ?self.hub,
+                        "dropped a provider record that was missing its terminator"
+                    );
                 }
                 break;
             }
             match self.process_record(generation, frame) {
                 Ok(ProcessOutcome::Continue) => {}
                 Ok(ProcessOutcome::Close) => return Ok(ProcessOutcome::Close),
-                Err(RealtimeError::Decode(_) | RealtimeError::Protocol(_)) => {
-                    self.event_flow.mark_gap(generation);
+                Err(error @ (RealtimeError::Decode(_) | RealtimeError::Protocol(_))) => {
+                    // One malformed record is skipped and logged; it never
+                    // latches a gap or hides records after it
+                    // (SharurMinus#1180, operator ruling 2026-11-02).
+                    tracing::warn!(%error, hub = ?self.hub, "skipped a malformed provider record");
                 }
                 Err(error) => return Err(error),
             }

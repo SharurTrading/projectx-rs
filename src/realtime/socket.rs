@@ -346,6 +346,9 @@ where
                         return Ok(());
                     };
                     let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
+                        // An undecodable transport frame loses an unknown
+                        // number of records; unlike one malformed record, that
+                        // stays a transport gap.
                         inner.event_flow.mark_gap(generation);
                         continue;
                     };

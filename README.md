@@ -275,12 +275,16 @@ for 15 seconds ends that failed socket. Ordinary application-data silence has no
 
 ### Transport gaps and `acknowledge_transport_gap`
 
-Real-time event delivery retains every accepted event without a fixed queue limit. Malformed SignalR
-records latch one nonterminal `TransportGap`. The accepted prefix is delivered first; the gap then reaches
-the consumer without waiting for disconnection. Later application data is discarded with that
-explicit signal until the consumer installs its recovery boundary and calls
-`acknowledge_transport_gap()`. Valid invocation completions and keepalives continue throughout.
-Malformed records do not hide later valid control records in the same batch.
+Real-time event delivery retains every accepted event without a fixed queue limit. A malformed
+SignalR record — invalid JSON, a missing or invalid contract argument, a wrong argument list, an
+empty record, or a record missing its terminator — is skipped and logged through `tracing` and
+never gates delivery: records before and after it still arrive, no gap is raised, and no snapshot
+or projection needs clearing because of one bad row. `TransportGap` is reserved for
+transport-level loss of an unknown number of records — currently a binary frame that is not valid
+UTF-8. That gap reaches the consumer without waiting for disconnection; later application data is
+discarded with that explicit signal until the consumer installs its recovery boundary and calls
+`acknowledge_transport_gap()`. Valid invocation completions and keepalives continue throughout a
+gap.
 
 Gap acknowledgement resumes data admission on the same socket. It never requests a reconnect.
 If the socket actually ends during the gap, its lifecycle boundary is retained separately from the
