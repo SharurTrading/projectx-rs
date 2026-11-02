@@ -8,6 +8,19 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [7.0.2] - 2026-11-02
+
+### Fixed
+
+- Restore the 7.0.0 user-hub contract for a malformed real-time record: invalid JSON, a missing
+  or invalid contract argument, a wrong argument list, an empty record, or a record missing its
+  terminator latches a `TransportGap` on the user hub again, where a silently skipped row could
+  lose an order, position, or execution update
+  ([#123](https://github.com/SharurTrading/projectx-rs/issues/123), correcting the user-hub scope
+  of 7.0.1; the long-term user-hub contract is under investigation in
+  [SharurMinus#1193](https://github.com/SharurTrading/SharurMinus/issues/1193)). The market-hub
+  skip-and-log from 7.0.1 is unchanged, and an undecodable binary frame is a gap on both hubs.
+
 ## [7.0.1] - 2026-11-02
 
 ### Fixed
@@ -488,6 +501,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[7.0.2]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.1...v7.0.2
 [7.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.0...v7.0.1
 [7.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.2.0...v7.0.0
 [6.2.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.1...v6.2.0

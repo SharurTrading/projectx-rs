@@ -6,8 +6,8 @@ SPDX-License-Identifier: MIT-0
 # projectx-rs
 
 [![CI](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/SharurTrading/projectx-rs/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=7.0.1)](https://crates.io/crates/projectx-client/7.0.1)
-[![docs.rs](https://img.shields.io/docsrs/projectx-client/7.0.1?v=7.0.1)](https://docs.rs/projectx-client/7.0.1/projectx_client/)
+[![crates.io](https://img.shields.io/crates/v/projectx-client.svg?v=7.0.2)](https://crates.io/crates/projectx-client/7.0.2)
+[![docs.rs](https://img.shields.io/docsrs/projectx-client/7.0.2?v=7.0.2)](https://docs.rs/projectx-client/7.0.2/projectx_client/)
 [![license: MIT-0](https://img.shields.io/badge/license-MIT--0-blue.svg)](LICENSE)
 
 > [!IMPORTANT]
@@ -275,16 +275,18 @@ for 15 seconds ends that failed socket. Ordinary application-data silence has no
 
 ### Transport gaps and `acknowledge_transport_gap`
 
-Real-time event delivery retains every accepted event without a fixed queue limit. A malformed
-SignalR record — invalid JSON, a missing or invalid contract argument, a wrong argument list, an
-empty record, or a record missing its terminator — is skipped and logged through `tracing` and
-never gates delivery: records before and after it still arrive, no gap is raised, and no snapshot
-or projection needs clearing because of one bad row. `TransportGap` is reserved for
-transport-level loss of an unknown number of records — currently a binary frame that is not valid
-UTF-8. That gap reaches the consumer without waiting for disconnection; later application data is
-discarded with that explicit signal until the consumer installs its recovery boundary and calls
-`acknowledge_transport_gap()`. Valid invocation completions and keepalives continue throughout a
-gap.
+Real-time event delivery retains every accepted event without a fixed queue limit. On the market
+hub, a malformed SignalR record — invalid JSON, a missing or invalid contract argument, a wrong
+argument list, an empty record, or a record missing its terminator — is skipped and logged through
+`tracing` and never gates delivery: records before and after it still arrive, no gap is raised, and
+no chart needs reloading because of one bad row. On the user hub the 7.0.0 contract stands: the
+same malformed record latches a `TransportGap`, because a silently skipped row there could lose an
+order, position, or execution update; the long-term user-hub contract is an open investigation
+with the operator. Otherwise `TransportGap` marks transport-level loss of an unknown number of
+records — a binary frame that is not valid UTF-8. That gap reaches the consumer without waiting
+for disconnection; later application data is discarded with that explicit signal until the
+consumer installs its recovery boundary and calls `acknowledge_transport_gap()`. Valid invocation
+completions and keepalives continue throughout a gap.
 
 Gap acknowledgement resumes data admission on the same socket. It never requests a reconnect.
 If the socket actually ends during the gap, its lifecycle boundary is retained separately from the

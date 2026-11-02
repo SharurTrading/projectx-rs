@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "projectx-client"
-version = "7.0.1"
+version = "7.0.2"
 dependencies = [
  "data-encoding",
  "futures-util",
