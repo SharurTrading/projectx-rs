@@ -717,8 +717,16 @@ impl RealtimeInner {
                         }
                         // Account state: the 7.0.0 contract stands until the
                         // SharurMinus#1193 investigation rules otherwise — the
-                        // discontinuity must announce itself.
-                        Hub::User => self.event_flow.mark_gap(generation),
+                        // discontinuity must announce itself. The log line
+                        // keeps that investigation's evidence; it never
+                        // carries record contents.
+                        Hub::User => {
+                            tracing::warn!(
+                                hub = ?self.hub,
+                                "unterminated provider record latched a gap"
+                            );
+                            self.event_flow.mark_gap(generation);
+                        }
                     }
                 }
                 break;
@@ -736,8 +744,18 @@ impl RealtimeInner {
                         }
                         // Account state: the 7.0.0 contract stands until the
                         // SharurMinus#1193 investigation rules otherwise — a
-                        // silently skipped row here could lose a fill.
-                        Hub::User => self.event_flow.mark_gap(generation),
+                        // silently skipped row here could lose a fill. The
+                        // error names the refusal; the record itself is never
+                        // logged, because user-hub payloads carry account and
+                        // order data.
+                        Hub::User => {
+                            tracing::warn!(
+                                %error,
+                                hub = ?self.hub,
+                                "malformed provider record latched a gap"
+                            );
+                            self.event_flow.mark_gap(generation);
+                        }
                     }
                 }
                 Err(error) => return Err(error),

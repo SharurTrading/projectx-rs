@@ -18,7 +18,9 @@ first public release.
   lose an order, position, or execution update
   ([#123](https://github.com/SharurTrading/projectx-rs/issues/123), correcting the user-hub scope
   of 7.0.1; the long-term user-hub contract is under investigation in
-  [SharurMinus#1193](https://github.com/SharurTrading/SharurMinus/issues/1193)). The market-hub
+  [SharurMinus#1193](https://github.com/SharurTrading/SharurMinus/issues/1193)). Each gap source
+  logs a distinct warning — malformed record, unterminated record, or undecodable binary frame —
+  with the hub but never record or frame contents. The market-hub
   skip-and-log from 7.0.1 is unchanged, and an undecodable binary frame is a gap on both hubs.
 
 ## [7.0.1] - 2026-11-02
