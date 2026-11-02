@@ -185,23 +185,8 @@ impl RealtimeInner {
         self: &Arc<Self>,
         reconnecting: bool,
     ) -> Result<ConnectClaim, RealtimeError> {
-        self.begin_connect_with_pre_lock(reconnecting, || {})
-    }
-
-    pub(super) fn begin_connect_with_pre_lock<F>(
-        self: &Arc<Self>,
-        reconnecting: bool,
-        before_lifecycle_lock: F,
-    ) -> Result<ConnectClaim, RealtimeError>
-    where
-        F: FnOnce(),
-    {
-        before_lifecycle_lock();
         let mut lifecycle = self.lifecycle.lock();
         self.ensure_event_receiver()?;
-        if self.event_flow.has_unacknowledged_gap() {
-            return Err(RealtimeError::TransportGapPending);
-        }
         if !matches!(*lifecycle, Lifecycle::Disconnected) {
             return Err(RealtimeError::AlreadyConnected);
         }
@@ -341,7 +326,7 @@ impl RealtimeInner {
         self.lifecycle_changed.notify_waiters();
         match published {
             Ok(PublishOutcome::Published) => Ok(()),
-            Ok(PublishOutcome::StaleGeneration | PublishOutcome::GapFenced) => {
+            Ok(PublishOutcome::StaleGeneration) => {
                 self.end_generation(generation);
                 Err(RealtimeError::ConnectionCancelled)
             }
@@ -600,10 +585,7 @@ impl RealtimeInner {
     }
 
     async fn watchdog_tick(self: &Arc<Self>) {
-        if !self.reconnect_enabled.load(Ordering::Acquire)
-            || self.event_flow.has_unacknowledged_gap()
-            || self.owner_cancel.is_cancelled()
-        {
+        if !self.reconnect_enabled.load(Ordering::Acquire) || self.owner_cancel.is_cancelled() {
             return;
         }
         let disconnected = matches!(*self.lifecycle.lock(), Lifecycle::Disconnected);
@@ -706,26 +688,20 @@ impl RealtimeInner {
             if records.peek().is_none() {
                 if !frame.is_empty() {
                     match self.hub {
-                        // Market data: a record is only accepted with its
-                        // terminator; a trailing fragment is dropped and
-                        // logged, never gated on (SharurMinus#1180).
                         Hub::Market => {
                             tracing::warn!(
                                 hub = ?self.hub,
                                 "dropped a provider record that was missing its terminator"
                             );
                         }
-                        // Account state: the 7.0.0 contract stands until the
-                        // SharurMinus#1193 investigation rules otherwise — the
-                        // discontinuity must announce itself. The log line
-                        // keeps that investigation's evidence; it never
-                        // carries record contents.
+                        // A skipped account row could lose a fill, so its
+                        // position in the stream remains explicit.
                         Hub::User => {
                             tracing::warn!(
                                 hub = ?self.hub,
-                                "unterminated provider record latched a gap"
+                                "unterminated provider record reported a gap"
                             );
-                            self.event_flow.mark_gap(generation);
+                            self.publish(generation, RealtimeEvent::TransportGap)?;
                         }
                     }
                 }
@@ -736,25 +712,18 @@ impl RealtimeInner {
                 Ok(ProcessOutcome::Close) => return Ok(ProcessOutcome::Close),
                 Err(error @ (RealtimeError::Decode(_) | RealtimeError::Protocol(_))) => {
                     match self.hub {
-                        // Market data: one malformed record is skipped and logged;
-                        // it never latches a gap or hides records after it
-                        // (SharurMinus#1180, operator ruling 2026-11-02).
                         Hub::Market => {
                             tracing::warn!(%error, hub = ?self.hub, "skipped a malformed provider record");
                         }
-                        // Account state: the 7.0.0 contract stands until the
-                        // SharurMinus#1193 investigation rules otherwise — a
-                        // silently skipped row here could lose a fill. The
-                        // error names the refusal; the record itself is never
-                        // logged, because user-hub payloads carry account and
-                        // order data.
+                        // User payloads carry account and order data;
+                        // log only the refusal, never the record itself.
                         Hub::User => {
                             tracing::warn!(
                                 %error,
                                 hub = ?self.hub,
-                                "malformed provider record latched a gap"
+                                "malformed provider record reported a gap"
                             );
-                            self.event_flow.mark_gap(generation);
+                            self.publish(generation, RealtimeEvent::TransportGap)?;
                         }
                     }
                 }

@@ -65,7 +65,6 @@ impl RealtimeClient {
                 event_rx: ParkingMutex::new(Some(RealtimeEventReceiver {
                     events: event_rx,
                     flow: Arc::clone(&event_flow),
-                    gap_reported: false,
                 })),
                 event_flow,
             }),

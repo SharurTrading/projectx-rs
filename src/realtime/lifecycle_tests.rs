@@ -139,41 +139,6 @@ async fn malformed_record_framing_is_rejected_before_publication() {
     ));
 }
 
-#[test]
-fn connect_claim_rechecks_the_gap_after_waiting_for_lifecycle() {
-    let realtime = fixture_realtime();
-    let before_lock = Arc::new(std::sync::Barrier::new(2));
-    let release_lock = Arc::new(std::sync::Barrier::new(2));
-    let worker_inner = Arc::clone(&realtime.inner);
-    let worker_before = Arc::clone(&before_lock);
-    let worker_release = Arc::clone(&release_lock);
-    let claim = std::thread::spawn(move || {
-        worker_inner.begin_connect_with_pre_lock(false, || {
-            worker_before.wait();
-            worker_release.wait();
-        })
-    });
-
-    before_lock.wait();
-    realtime
-        .inner
-        .event_flow
-        .start_generation(1)
-        .unwrap_or_else(|error| panic!("fixture generation must start: {error}"));
-    realtime.inner.event_flow.mark_gap(1);
-    realtime.inner.event_flow.finish_generation(1);
-    release_lock.wait();
-
-    let result = claim
-        .join()
-        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
-    assert!(matches!(result, Err(RealtimeError::TransportGapPending)));
-    assert!(matches!(
-        *realtime.inner.lifecycle.lock(),
-        Lifecycle::Disconnected
-    ));
-}
-
 #[tokio::test(start_paused = true)]
 async fn disconnect_waiter_timeout_keeps_the_owner_session_fenced() {
     let realtime = fixture_realtime();
@@ -403,7 +368,7 @@ async fn typed_subscriptions_reject_the_wrong_hub_before_network_io() {
 }
 
 #[tokio::test]
-async fn transport_gap_fences_connect_until_acknowledged() {
+async fn queued_loss_and_terminal_survive_a_later_connection_attempt() {
     let credentials = crate::Credentials::new("user", "key")
         .unwrap_or_else(|error| panic!("fixture credentials must be valid: {error}"));
     let client = crate::Client::builder(credentials)
@@ -419,7 +384,10 @@ async fn transport_gap_fences_connect_until_acknowledged() {
         .event_flow
         .start_generation(generation)
         .unwrap_or_else(|error| panic!("generation must start: {error}"));
-    realtime.inner.event_flow.mark_gap(generation);
+    realtime
+        .inner
+        .publish(generation, RealtimeEvent::TransportGap)
+        .unwrap_or_else(|error| panic!("gap must publish: {error}"));
     realtime
         .inner
         .event_flow
@@ -433,26 +401,11 @@ async fn transport_gap_fences_connect_until_acknowledged() {
 
     assert!(matches!(
         realtime.connect().await,
-        Err(RealtimeError::TransportGapPending)
-    ));
-    assert!(matches!(
-        events.recv().await,
-        Some(RealtimeEvent::TransportGap)
-    ));
-    assert!(matches!(
-        events.recv().await,
-        Some(RealtimeEvent::Disconnected)
-    ));
-    assert!(matches!(
-        realtime.connect().await,
-        Err(RealtimeError::TransportGapPending)
-    ));
-
-    events.acknowledge_transport_gap();
-    assert!(matches!(
-        realtime.connect().await,
         Err(RealtimeError::MissingAuthToken)
     ));
+    assert_eq!(events.queued_event_count(), 2);
+    assert_eq!(events.recv().await, Some(RealtimeEvent::TransportGap));
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
 }
 
 #[tokio::test]

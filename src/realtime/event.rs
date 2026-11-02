@@ -43,10 +43,10 @@ pub enum RealtimeEvent {
     /// record arrived on the user hub, where a silently skipped row could
     /// lose an order, position, or execution update.
     ///
-    /// A malformed record on the market hub is skipped and logged instead; it
-    /// never raises this event or hides records after it. Callers must fence
-    /// recovery and then call
-    /// [`crate::RealtimeEventReceiver::acknowledge_transport_gap`].
+    /// A malformed record on the market hub is skipped and logged instead.
+    /// Each observed loss occupies its source-ordered queue position; valid
+    /// later records remain available without an acknowledgment. Consumers
+    /// choose their own recovery boundary when they receive this notification.
     TransportGap,
     /// A provider type-1 invocation with an exact raw entity retained for typed decoding.
     Invocation(SignalRInvocation),

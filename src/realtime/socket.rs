@@ -22,6 +22,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 use super::error::RealtimeError;
+use super::event::RealtimeEvent;
 use super::invocation::SIGNALR_TERMINATOR;
 use super::lifecycle::{CLOSE_TIMEOUT, ProcessOutcome, RealtimeInner, Session};
 
@@ -346,16 +347,13 @@ where
                         return Ok(());
                     };
                     let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
-                        // An undecodable transport frame loses an unknown
-                        // number of records, which is a transport gap on both
-                        // hubs; only market-hub records are ever skipped. The
-                        // log line keeps the SharurMinus#1193 evidence and
-                        // never carries frame contents.
+                        // The frame may contain multiple lost records on
+                        // either hub; never log its potentially private data.
                         tracing::warn!(
                             hub = ?inner.hub,
-                            "undecodable binary frame latched a gap"
+                            "undecodable binary frame reported a gap"
                         );
-                        inner.event_flow.mark_gap(generation);
+                        inner.publish(generation, RealtimeEvent::TransportGap)?;
                         continue;
                     };
                     let outcome = inner.process_text(generation, text).await?;

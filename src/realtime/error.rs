@@ -58,9 +58,6 @@ pub enum RealtimeError {
     /// The writer task or channel closed.
     #[error("real-time writer is closed")]
     SendClosed,
-    /// Reconnection is fenced until the caller acknowledges a transport gap.
-    #[error("real-time reconnect is fenced by an unacknowledged transport gap")]
-    TransportGapPending,
     /// The single event receiver was dropped.
     #[error("real-time event receiver is closed")]
     EventReceiverClosed,

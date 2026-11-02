@@ -19,7 +19,7 @@ fn realtime() -> RealtimeClient {
 }
 
 #[tokio::test]
-async fn receiver_drop_during_gap_reports_closure_and_cannot_relatch_or_reconnect() {
+async fn receiver_drop_reports_closure_and_refuses_new_work() {
     let realtime = realtime();
     let events = realtime
         .take_event_receiver()
@@ -35,16 +35,16 @@ async fn receiver_drop_during_gap_reports_closure_and_cannot_relatch_or_reconnec
         )
         .unwrap_or_else(|error| panic!("accepted prefix: {error}"));
     assert_eq!(events.queued_event_count(), 1);
-    flow.mark_gap(1);
-    assert!(flow.has_unacknowledged_gap());
+    realtime
+        .inner
+        .publish(1, RealtimeEvent::TransportGap)
+        .unwrap_or_else(|error| panic!("gap: {error}"));
+    assert_eq!(events.queued_event_count(), 2);
     drop(events);
-    assert!(!flow.has_unacknowledged_gap());
     assert!(matches!(
         realtime.inner.publish(1, RealtimeEvent::Disconnected),
         Err(RealtimeError::EventReceiverClosed)
     ));
-    flow.mark_gap(1);
-    assert!(!flow.has_unacknowledged_gap());
     for record in ["{\"type\":6}\u{001e}", "malformed\u{001e}"] {
         realtime
             .inner
