@@ -1408,7 +1408,7 @@ async fn unanswered_socket_probe_ends_the_generation() {
         .unwrap_or_else(|error| panic!("fixture server must join: {error}"));
 }
 
-async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
+async fn exercise_malformed_records_skipped(records: String, expected_records: usize) {
     let http = MockServer::start_async().await;
     let _login = http
         .mock_async(|when, then| {
@@ -1473,16 +1473,269 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
         .session()
         .unwrap_or_else(|e| panic!("session: {e}"));
     assert_eq!(session.generation(), first.generation);
-    // Completion must pass even though a malformed record fenced data delivery.
     assert!(session.invoke("Trigger", &[]).await.is_ok());
-    for _ in 0..expected_prefix {
+    let mut sequence = 0u64;
+    for _ in 0..expected_records {
         let message = events
             .recv_message()
             .await
-            .unwrap_or_else(|| panic!("prefix"));
+            .unwrap_or_else(|| panic!("record around a malformed record"));
         assert_eq!(message.generation, first.generation);
-        assert!(matches!(message.event, RealtimeEvent::Message(_)));
+        let RealtimeEvent::Message(value) = message.event else {
+            panic!("expected an application record, got {:?}", message.event);
+        };
+        if let Some(observed) = value.get("sequence").and_then(Value::as_u64) {
+            assert_eq!(
+                observed, sequence,
+                "records must arrive in source order across a malformed record"
+            );
+            sequence += 1;
+        }
     }
+    // No gap was latched: the next pushed record is delivered without any
+    // acknowledge_transport_gap call.
+    assert!(realtime.is_connected());
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    let after = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("continued data"));
+    assert_eq!(after.generation, first.generation);
+    assert_eq!(
+        after.event,
+        RealtimeEvent::Message(json!({"type":42,"after":true}))
+    );
+    assert!(realtime.disconnect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn malformed_record_is_skipped_and_later_records_still_arrive() {
+    exercise_malformed_records_skipped(
+        format!(
+            "{}{TERMINATOR}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}",
+            json!({"type":42,"sequence":"before"}),
+            json!({"type":42,"sequence":"after"}),
+        ),
+        2,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn malformed_record_after_a_backlog_does_not_hide_later_records() {
+    use std::fmt::Write as _;
+    let mut records = String::new();
+    for sequence in 0..513u64 {
+        write!(
+            records,
+            "{}{TERMINATOR}",
+            json!({"type":42,"sequence":sequence})
+        )
+        .unwrap_or_else(|e| panic!("fixture format: {e}"));
+    }
+    write!(
+        records,
+        "{{broken}}{TERMINATOR}{}{TERMINATOR}",
+        json!({"type":42,"sequence":513})
+    )
+    .unwrap_or_else(|e| panic!("fixture format: {e}"));
+    exercise_malformed_records_skipped(records, 514).await;
+}
+
+#[tokio::test]
+async fn malformed_invocation_arguments_are_skipped_without_a_gap() {
+    // The SharurMinus#1180 case: one type-1 record whose contract argument
+    // fails validation must not cost a whole-source gap.
+    exercise_malformed_records_skipped(
+        format!(
+            "{}{TERMINATOR}{}{TERMINATOR}{}{TERMINATOR}{}{TERMINATOR}",
+            json!({"type":1,"target":"ContractChange","arguments":[5,{"price":1}]}),
+            json!({"type":1,"target":"ContractChange","arguments":[]}),
+            json!({"type":1,"target":"ContractChange","arguments":[{"a":1},{"b":2},{"c":3}]}),
+            json!({"type":42,"sequence":"after"}),
+        ),
+        1,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unterminated_trailing_record_is_dropped_without_a_gap() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let mut tail_pushed = false;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(text.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|e| panic!("request: {e}"));
+                    let Some(id) = value.get("invocationId") else {
+                        continue;
+                    };
+                    let completion = json!({"type":3,"invocationId":id});
+                    let data = if value["target"] == "Trigger" {
+                        format!("{}{TERMINATOR}", json!({"type":42,"sequence":"before"}))
+                    } else {
+                        format!("{}{TERMINATOR}", json!({"type":42,"after":true}))
+                    };
+                    socket
+                        .send(Message::Text(
+                            format!("{data}{completion}{TERMINATOR}").into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|e| panic!("response: {e}"));
+                    if value["target"] == "Trigger" && !tail_pushed {
+                        tail_pushed = true;
+                        // One provider record arrives without its terminator.
+                        socket
+                            .send(Message::Text("{\"type\":42,\"tail\":true}".into()))
+                            .await
+                            .unwrap_or_else(|e| panic!("tail: {e}"));
+                    }
+                }
+                Message::Close(_) => {
+                    let _ = socket.flush().await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    let client = fixture_builder(&http, address)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    assert_eq!(first.event, RealtimeEvent::Connected);
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert!(session.invoke("Trigger", &[]).await.is_ok());
+    let before = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("before"));
+    assert_eq!(
+        before.event,
+        RealtimeEvent::Message(json!({"type":42,"sequence":"before"}))
+    );
+    // The unterminated tail was dropped: the next delivered record is the
+    // Healthy response, not the tail and not a gap.
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    let after = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("continued data"));
+    assert_eq!(
+        after.event,
+        RealtimeEvent::Message(json!({"type":42,"after":true}))
+    );
+    assert!(realtime.is_connected());
+    assert!(realtime.disconnect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn undecodable_binary_frame_reports_transport_gap_until_acknowledged() {
+    // Transport-level loss keeps its fencing gap: a binary frame that is not
+    // valid UTF-8 loses an unknown number of records.
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(text.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|e| panic!("request: {e}"));
+                    let Some(id) = value.get("invocationId") else {
+                        continue;
+                    };
+                    let completion = json!({"type":3,"invocationId":id});
+                    let data = if value["target"] == "Trigger" {
+                        socket
+                            .send(Message::Binary(vec![0xff, 0xfe].into()))
+                            .await
+                            .unwrap_or_else(|e| panic!("binary: {e}"));
+                        String::new()
+                    } else {
+                        format!("{}{TERMINATOR}", json!({"type":42,"after":true}))
+                    };
+                    socket
+                        .send(Message::Text(
+                            format!("{data}{completion}{TERMINATOR}").into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|e| panic!("response: {e}"));
+                }
+                Message::Close(_) => {
+                    let _ = socket.flush().await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    let client = fixture_builder(&http, address)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::Market);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    assert_eq!(first.event, RealtimeEvent::Connected);
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert_eq!(session.generation(), first.generation);
+    // The invocation completion still resolves even though the binary frame
+    // latched a gap.
+    assert!(session.invoke("Trigger", &[]).await.is_ok());
     let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
     assert_eq!(gap.generation, first.generation);
     assert_eq!(gap.event, RealtimeEvent::TransportGap);
@@ -1501,32 +1754,6 @@ async fn exercise_nonterminal_gap(records: String, expected_prefix: usize) {
     assert!(realtime.disconnect().await.is_ok());
     assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
     server.await.unwrap_or_else(|e| panic!("server: {e}"));
-}
-
-#[tokio::test]
-async fn malformed_record_keeps_socket_and_processes_later_completion_in_batch() {
-    exercise_nonterminal_gap(
-        "{broken}\u{001e}{\"type\":3,\"invocationId\":null}\u{001e}".to_owned(),
-        0,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn malformed_record_after_a_backlog_keeps_completions_until_gap_ack() {
-    use std::fmt::Write as _;
-    let mut records = String::new();
-    for sequence in 0..513 {
-        write!(
-            records,
-            "{}{}",
-            json!({"type":42,"sequence":sequence}),
-            TERMINATOR
-        )
-        .unwrap_or_else(|e| panic!("fixture format: {e}"));
-    }
-    write!(records, "{{broken}}{TERMINATOR}").unwrap_or_else(|e| panic!("fixture format: {e}"));
-    exercise_nonterminal_gap(records, 513).await;
 }
 
 #[tokio::test]
