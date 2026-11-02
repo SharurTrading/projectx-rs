@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [7.0.1] - 2026-11-02
 
 ### Fixed
 
@@ -34,6 +34,8 @@ first public release.
 - Refresh the CI action pins — `Swatinem/rust-cache` v2.9.2 to v2.9.3 and
   `taiki-e/install-action` v2.87.28 to v2.87.30 — through
   [#110](https://github.com/SharurTrading/projectx-rs/pull/110).
+- Update the `taiki-e/install-action` action from v2.87.30 to v2.88.0 through
+  [#119](https://github.com/SharurTrading/projectx-rs/pull/119).
 
 ## [7.0.0] - 2026-10-20
 
@@ -486,6 +488,7 @@ first public release.
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[7.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.0...v7.0.1
 [7.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.2.0...v7.0.0
 [6.2.0]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.1...v6.2.0
 [6.1.1]: https://github.com/SharurTrading/projectx-rs/compare/v6.1.0...v6.1.1
