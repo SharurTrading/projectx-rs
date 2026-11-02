@@ -2157,3 +2157,220 @@ fn invalid_realtime_queue_and_deadline_settings_fail_before_runtime_construction
         );
     }
 }
+
+async fn exercise_malformed_record_gaps_on_the_user_hub(records: String, expected_prefix: usize) {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(text.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|e| panic!("request: {e}"));
+                    let Some(id) = value.get("invocationId") else {
+                        continue;
+                    };
+                    let completion = json!({"type":3,"invocationId":id});
+                    let data = if value["target"] == "Trigger" {
+                        records.clone()
+                    } else {
+                        format!("{}{TERMINATOR}", json!({"type":42,"after":true}))
+                    };
+                    socket
+                        .send(Message::Text(
+                            format!("{data}{completion}{TERMINATOR}").into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|e| panic!("response: {e}"));
+                }
+                Message::Close(_) => {
+                    let _ = socket.flush().await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    let client = fixture_builder(&http, address)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::User);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    assert_eq!(first.event, RealtimeEvent::Connected);
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert_eq!(session.generation(), first.generation);
+    assert!(session.invoke("Trigger", &[]).await.is_ok());
+    for _ in 0..expected_prefix {
+        let message = events
+            .recv_message()
+            .await
+            .unwrap_or_else(|| panic!("prefix"));
+        assert_eq!(message.generation, first.generation);
+        assert!(matches!(message.event, RealtimeEvent::Message(_)));
+    }
+    // The restored 7.0.0 user-hub contract: the malformed record latches a
+    // gap instead of being skipped silently.
+    let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
+    assert_eq!(gap.generation, first.generation);
+    assert_eq!(gap.event, RealtimeEvent::TransportGap);
+    assert!(realtime.is_connected());
+    events.acknowledge_transport_gap();
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    let after = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("continued data"));
+    assert_eq!(after.generation, first.generation);
+    assert_eq!(
+        after.event,
+        RealtimeEvent::Message(json!({"type":42,"after":true}))
+    );
+    assert!(realtime.disconnect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}
+
+#[tokio::test]
+async fn malformed_record_latches_a_gap_on_the_user_hub_but_not_the_market_hub() {
+    let broken_batch = format!(
+        "{}{TERMINATOR}{{broken}}{TERMINATOR}{}{TERMINATOR}",
+        json!({"type":42,"sequence":"before"}),
+        json!({"type":42,"sequence":"after"}),
+    );
+    // Market hub: SharurMinus#1180 — one bad row is skipped and logged, and
+    // records after it still arrive.
+    exercise_malformed_records_skipped(broken_batch.clone(), 2).await;
+    // User hub: the restored 7.0.0 contract — the same batch latches a gap,
+    // because a silently skipped account row could lose a fill; SharurMinus
+    // #1193 decides the long-term answer.
+    exercise_malformed_record_gaps_on_the_user_hub(broken_batch, 1).await;
+}
+
+#[tokio::test]
+async fn unterminated_trailing_record_latches_a_gap_on_the_user_hub() {
+    let http = MockServer::start_async().await;
+    let _login = http
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/Auth/loginKey");
+            then.status(200)
+                .json_body(json!({"success":true,"errorCode":0,"token":"synthetic"}));
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("address: {e}"));
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_socket(&listener).await;
+        complete_handshake(&mut socket).await;
+        let mut tail_pushed = false;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(text.trim_end_matches(TERMINATOR))
+                        .unwrap_or_else(|e| panic!("request: {e}"));
+                    let Some(id) = value.get("invocationId") else {
+                        continue;
+                    };
+                    let completion = json!({"type":3,"invocationId":id});
+                    let data = if value["target"] == "Trigger" {
+                        format!("{}{TERMINATOR}", json!({"type":42,"sequence":"before"}))
+                    } else {
+                        format!("{}{TERMINATOR}", json!({"type":42,"after":true}))
+                    };
+                    socket
+                        .send(Message::Text(
+                            format!("{data}{completion}{TERMINATOR}").into(),
+                        ))
+                        .await
+                        .unwrap_or_else(|e| panic!("response: {e}"));
+                    if value["target"] == "Trigger" && !tail_pushed {
+                        tail_pushed = true;
+                        // One provider record arrives without its terminator.
+                        socket
+                            .send(Message::Text("{\"type\":42,\"tail\":true}".into()))
+                            .await
+                            .unwrap_or_else(|e| panic!("tail: {e}"));
+                    }
+                }
+                Message::Close(_) => {
+                    let _ = socket.flush().await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    let client = fixture_builder(&http, address)
+        .build()
+        .unwrap_or_else(|e| panic!("client: {e}"));
+    authenticate_fixture(&client).await;
+    let realtime = client.realtime(Hub::User);
+    let mut events = realtime
+        .take_event_receiver()
+        .unwrap_or_else(|| panic!("receiver"));
+    assert!(realtime.connect().await.is_ok());
+    let first = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("connected"));
+    assert_eq!(first.event, RealtimeEvent::Connected);
+    let session = realtime
+        .session()
+        .unwrap_or_else(|e| panic!("session: {e}"));
+    assert!(session.invoke("Trigger", &[]).await.is_ok());
+    let before = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("before"));
+    assert_eq!(
+        before.event,
+        RealtimeEvent::Message(json!({"type":42,"sequence":"before"}))
+    );
+    // The unterminated tail latches the restored 7.0.0 user-hub gap; the
+    // Healthy completion still resolves while the fence holds.
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    let gap = events.recv_message().await.unwrap_or_else(|| panic!("gap"));
+    assert_eq!(gap.generation, first.generation);
+    assert_eq!(gap.event, RealtimeEvent::TransportGap);
+    events.acknowledge_transport_gap();
+    assert!(session.invoke("Healthy", &[]).await.is_ok());
+    let after = events
+        .recv_message()
+        .await
+        .unwrap_or_else(|| panic!("continued data"));
+    assert_eq!(
+        after.event,
+        RealtimeEvent::Message(json!({"type":42,"after":true}))
+    );
+    assert!(realtime.is_connected());
+    assert!(realtime.disconnect().await.is_ok());
+    assert_eq!(events.recv().await, Some(RealtimeEvent::Disconnected));
+    server.await.unwrap_or_else(|e| panic!("server: {e}"));
+}

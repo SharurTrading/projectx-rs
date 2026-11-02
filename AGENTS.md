@@ -71,8 +71,10 @@ domain translation.
   estimated-memory charges. Coalesced records yield to a ready consumer rather than monopolizing
   its executor. A websocket is not ready until the SignalR handshake is validated. Real-time
   lifecycle transitions are generation-fenced and single-writer. Invocation cancellation/timeout
-  reclaims only its pending slot, never the socket. Malformed application records are skipped and
-  logged and never gate later records; local backlog never produces a gap. Ordinary silence never
+  reclaims only its pending slot, never the socket. Malformed market-data records are skipped and
+  logged and never gate later records; malformed user-hub records keep the 7.0.0 gap that
+  announces itself until the operator rules otherwise (SharurMinus#1193); local backlog never
+  produces a gap. Ordinary silence never
   triggers teardown. Actual socket failure and
   remote close permit transport recovery while Connect remains requested. Generation-ended evidence
   follows both socket-task joins. Explicit disconnect and dropping the final client owner cancel

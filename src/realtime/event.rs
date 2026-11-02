@@ -39,13 +39,14 @@ pub enum RealtimeEvent {
     /// Callers must replay their canonical subscription set after receiving
     /// this event.
     Reconnected,
-    /// Transport continuity was lost inside a live socket: a frame the client
-    /// could not decode into provider records arrived, so an unknown number of
-    /// records is lost.
+    /// Transport continuity was lost inside a live socket, or a malformed
+    /// record arrived on the user hub, where a silently skipped row could
+    /// lose an order, position, or execution update.
     ///
-    /// One malformed provider record is skipped and logged instead; it never
-    /// raises this event or hides records after it. Callers must fence recovery
-    /// and then call [`crate::RealtimeEventReceiver::acknowledge_transport_gap`].
+    /// A malformed record on the market hub is skipped and logged instead; it
+    /// never raises this event or hides records after it. Callers must fence
+    /// recovery and then call
+    /// [`crate::RealtimeEventReceiver::acknowledge_transport_gap`].
     TransportGap,
     /// A provider type-1 invocation with an exact raw entity retained for typed decoding.
     Invocation(SignalRInvocation),

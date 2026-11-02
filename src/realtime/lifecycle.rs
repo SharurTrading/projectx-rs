@@ -705,12 +705,21 @@ impl RealtimeInner {
             }
             if records.peek().is_none() {
                 if !frame.is_empty() {
-                    // A record is only accepted with its terminator; a trailing
-                    // fragment is dropped and logged, never gated on.
-                    tracing::warn!(
-                        hub = ?self.hub,
-                        "dropped a provider record that was missing its terminator"
-                    );
+                    match self.hub {
+                        // Market data: a record is only accepted with its
+                        // terminator; a trailing fragment is dropped and
+                        // logged, never gated on (SharurMinus#1180).
+                        Hub::Market => {
+                            tracing::warn!(
+                                hub = ?self.hub,
+                                "dropped a provider record that was missing its terminator"
+                            );
+                        }
+                        // Account state: the 7.0.0 contract stands until the
+                        // SharurMinus#1193 investigation rules otherwise — the
+                        // discontinuity must announce itself.
+                        Hub::User => self.event_flow.mark_gap(generation),
+                    }
                 }
                 break;
             }
@@ -718,10 +727,18 @@ impl RealtimeInner {
                 Ok(ProcessOutcome::Continue) => {}
                 Ok(ProcessOutcome::Close) => return Ok(ProcessOutcome::Close),
                 Err(error @ (RealtimeError::Decode(_) | RealtimeError::Protocol(_))) => {
-                    // One malformed record is skipped and logged; it never
-                    // latches a gap or hides records after it
-                    // (SharurMinus#1180, operator ruling 2026-11-02).
-                    tracing::warn!(%error, hub = ?self.hub, "skipped a malformed provider record");
+                    match self.hub {
+                        // Market data: one malformed record is skipped and logged;
+                        // it never latches a gap or hides records after it
+                        // (SharurMinus#1180, operator ruling 2026-11-02).
+                        Hub::Market => {
+                            tracing::warn!(%error, hub = ?self.hub, "skipped a malformed provider record");
+                        }
+                        // Account state: the 7.0.0 contract stands until the
+                        // SharurMinus#1193 investigation rules otherwise — a
+                        // silently skipped row here could lose a fill.
+                        Hub::User => self.event_flow.mark_gap(generation),
+                    }
                 }
                 Err(error) => return Err(error),
             }

@@ -347,8 +347,8 @@ where
                     };
                     let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
                         // An undecodable transport frame loses an unknown
-                        // number of records; unlike one malformed record, that
-                        // stays a transport gap.
+                        // number of records, which is a transport gap on both
+                        // hubs; only market-hub records are ever skipped.
                         inner.event_flow.mark_gap(generation);
                         continue;
                     };
