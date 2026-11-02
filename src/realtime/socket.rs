@@ -348,7 +348,13 @@ where
                     let Ok(text) = std::str::from_utf8(bytes.as_ref()) else {
                         // An undecodable transport frame loses an unknown
                         // number of records, which is a transport gap on both
-                        // hubs; only market-hub records are ever skipped.
+                        // hubs; only market-hub records are ever skipped. The
+                        // log line keeps the SharurMinus#1193 evidence and
+                        // never carries frame contents.
+                        tracing::warn!(
+                            hub = ?inner.hub,
+                            "undecodable binary frame latched a gap"
+                        );
                         inner.event_flow.mark_gap(generation);
                         continue;
                     };
