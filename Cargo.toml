@@ -38,7 +38,7 @@ httpdate = "1.0.3"
 jiff = { version = "0.2.35", default-features = false, features = ["serde", "std"] }
 parking_lot = "0.13.0"
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["http2", "json", "rustls", "stream"] }
 rust_decimal = "1.42.1"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -8,6 +8,18 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Changed
+
+- REST requests negotiate HTTP/2 with gateways that offer it, falling back to HTTP/1.1, so
+  concurrent requests such as a flatten's cancels share one connection instead of opening one
+  each. Pooled REST connections are no longer closed after 90 seconds idle: an idle HTTP/2
+  connection is pinged every 30 seconds and closed if a ping goes unanswered for 10 seconds,
+  and HTTP/1.1 connections keep the 15-second TCP keep-alive. The first request after a quiet
+  stretch no longer pays for a new TCP and TLS handshake. The real-time hub transport is
+  unchanged and stays on HTTP/1.1.
+
 ## [8.0.0] - 2026-11-02
 
 ### Breaking changes
