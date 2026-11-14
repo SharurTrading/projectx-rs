@@ -8,7 +8,7 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
-## [Unreleased]
+## [8.1.0] - 2026-11-14
 
 ### Changed
 
@@ -535,6 +535,7 @@ frames still report loss on either hub. No live-provider completeness guarantee 
   doctests, package verification, locked dependency policy, and full-history secret scanning; pin
   every third-party GitHub Action to an immutable commit.
 
+[8.1.0]: https://github.com/SharurTrading/projectx-rs/compare/v8.0.0...v8.1.0
 [8.0.0]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.2...v8.0.0
 [7.0.2]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.1...v7.0.2
 [7.0.1]: https://github.com/SharurTrading/projectx-rs/compare/v7.0.0...v7.0.1

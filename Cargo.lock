@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "projectx-client"
-version = "8.0.0"
+version = "8.1.0"
 dependencies = [
  "data-encoding",
  "futures-util",
