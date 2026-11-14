@@ -40,6 +40,12 @@ const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const DEFAULT_RETRY_MAX: Duration = Duration::from_secs(10);
 const USER_AGENT: &str = concat!("projectx-client/", env!("CARGO_PKG_VERSION"));
+/// How often an idle HTTP/2 REST connection is pinged, so the gateway and the
+/// network path keep it open through a quiet stretch.
+const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a keep-alive ping may go unanswered before its connection is
+/// closed and the next request opens a new one.
+const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Authenticated `ProjectX` REST client.
 ///
@@ -1477,11 +1483,19 @@ impl ClientBuilder {
             header::HeaderValue::from_static("application/json"),
         );
 
+        // A pooled REST connection is closed only by its peer or a failed
+        // keep-alive probe, never for idleness alone: dropping it made the
+        // first request after a quiet stretch, often an order or a cancel,
+        // pay for a new TCP and TLS handshake.
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .retry(reqwest::retry::never())
             .default_headers(headers)
             .timeout(self.timeout)
+            .pool_idle_timeout(None)
+            .http2_keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
+            .http2_keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
+            .http2_keep_alive_while_idle(true)
             .redirect(Policy::none());
         let mut realtime_builder = reqwest::Client::builder()
             .no_proxy()
