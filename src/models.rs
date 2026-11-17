@@ -1856,9 +1856,16 @@ pub struct MarketDepth {
     /// Price level.
     #[serde(with = "crate::decimal_serde")]
     pub price: Decimal,
-    /// Incremental volume for the update.
+    /// Total volume at the price level, as the provider documents it.
+    ///
+    /// Observed: on a bid, ask or best-price row this is the level's resting
+    /// size after the update, and zero means the level is gone. On a trade
+    /// row it is the session's traded volume at that price.
     pub volume: i64,
-    /// Resting volume after the update.
+    /// Current volume at the price level, as the provider documents it.
+    ///
+    /// Observed: zero on every bid, ask and best-price row, so it is not a
+    /// level's resting size. On a trade row it is the size of the print.
     pub current_volume: i64,
     /// Zero-based level index, when supplied.
     #[serde(default)]
