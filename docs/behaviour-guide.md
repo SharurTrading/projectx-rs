@@ -231,14 +231,32 @@ in the window.
 - Client: quotes are sparse updates. A missing field means "not in this
   update", never zero. Merge them per contract.
 - Documented: quotes carry best bid and ask prices but no sizes.
-- Documented: depth rows give a price level's resting size. Zero means the
-  level is gone. A reset row clears the book. There is no stated level
-  count and no opening snapshot. After a reconnect, clear your book and
-  rebuild it.
+- Documented: a depth row's `volume` is the total volume at its price
+  level and `currentVolume` the current volume there. There is no stated
+  level count and no documented opening snapshot.
+- Observed (2026-11-17, `projectx-client` 8.1.0, one micro index future on
+  a practice profile): on a bid, ask or best-price row `volume` is the
+  level's resting size after the update, and zero means the level is gone.
+  `currentVolume` was zero on every such row, so do not read it as the
+  resting size. On a trade row `volume` is the session's traded volume at
+  that price and `currentVolume` the size of the print.
+- Observed (same session): opening a book sent one reset row, then one
+  frame holding the whole book: every resting bid and ask level, the
+  session's traded volume by price, and the best bid, best ask, high and
+  low. Every row in that frame was stamped `0001-01-01T00:00:00+00:00`.
+  Live rows with real timestamps followed. A reset row clears the book;
+  after a reconnect, clear your book and rebuild it.
+- Observed (same session): live depth rows carried two fields the provider
+  does not document, `epoch` and `seq`. `epoch` was always `0`. `seq` rose
+  from frame to frame, skipped values and ran out of order inside one
+  frame, so it is not a gap check on its own.
+- Client: `MarketDepth` carries neither `epoch` nor `seq`.
 
 ### Timestamps
 
-No row carries a sequence number. Use ids to match rows, not times.
+No row carries a documented sequence number; the `seq` observed on live
+depth rows is described under [Live market data](#live-market-data). Use
+ids to match rows, not times.
 
 | Row | Field | What it means |
 | --- | --- | --- |
@@ -621,7 +639,7 @@ These are limits of the venue or of our evidence, not promises.
 
 | Gap | Status |
 | --- | --- |
-| Sequence number or resume point on hub rows | None exists |
+| Sequence number or resume point on hub rows | None documented |
 | Atomic snapshot across accounts, orders, positions | Not offered |
 | Trade search paging, retention, completeness | Not stated |
 | Ids unique across accounts | Not stated |
