@@ -8,6 +8,17 @@ SPDX-License-Identifier: MIT-0
 All notable changes will be documented here. This project follows Semantic Versioning after its
 first public release.
 
+## [Unreleased]
+
+### Breaking changes
+
+- Update `jiff` from 0.2.43 to 1.0.1 through
+  [#140](https://github.com/SharurTrading/projectx-rs/pull/140). `Timestamp::as_jiff`,
+  `ProviderDate::as_jiff` and the `From` conversions to and from `jiff::Timestamp` and
+  `jiff::civil::Date` now use jiff 1.0 types, so a caller that stays on jiff 0.2 has to move to
+  jiff 1.0 to keep using them. Parsing, serialization and the validated types themselves are
+  unchanged.
+
 ## [8.1.0] - 2026-11-14
 
 ### Changed
