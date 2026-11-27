@@ -5,13 +5,14 @@
 
 use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
 /// An absolute provider timestamp parsed from an ISO-8601/RFC-3339 value.
 ///
 /// Parsing normalizes equivalent offsets to one canonical instant. Serialization
-/// emits the canonical representation accepted by the Gateway API.
+/// emits the canonical representation accepted by the Gateway API. Leap
+/// seconds are rejected because they are outside the instant model.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct Timestamp(jiff::Timestamp);
@@ -50,10 +51,7 @@ impl FromStr for Timestamp {
     type Err = TimestampError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse::<jiff::Timestamp>()
-            .map(Self)
-            .map_err(|_| TimestampError)
+        parse_timestamp(value.as_bytes())
     }
 }
 
@@ -85,9 +83,46 @@ impl<'de> Deserialize<'de> for Timestamp {
     where
         D: Deserializer<'de>,
     {
-        let timestamp = jiff::Timestamp::deserialize(deserializer)?;
-        Ok(Self(timestamp))
+        deserializer.deserialize_str(TimestampVisitor)
     }
+}
+
+struct TimestampVisitor;
+
+impl de::Visitor<'_> for TimestampVisitor {
+    type Value = Timestamp;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an absolute timestamp string")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        self.visit_bytes(value.as_bytes())
+    }
+
+    fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+        parse_timestamp(value).map_err(E::custom)
+    }
+}
+
+fn parse_timestamp(value: &[u8]) -> Result<Timestamp, TimestampError> {
+    let time = value
+        .splitn(2, |byte| matches!(byte, b'T' | b't' | b' '))
+        .nth(1);
+    // The raw seconds are checked before Jiff clamps a leap second to :59.
+    if matches!(
+        time,
+        Some(
+            [_, _, b':', _, _, b':', b'6', b'0', ..]
+                | [_, _, b'0'..=b'9', b'0'..=b'9', b'6', b'0', ..]
+        )
+    ) {
+        return Err(TimestampError);
+    }
+    jiff::fmt::temporal::DateTimeParser::new()
+        .parse_timestamp(value)
+        .map(Timestamp)
+        .map_err(|_| TimestampError)
 }
 
 /// A string was not a valid absolute provider timestamp.

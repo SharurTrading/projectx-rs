@@ -354,6 +354,31 @@ fn current_provider_response_fields_decode_exactly() {
 }
 
 #[test]
+fn order_revision_timestamps_preserve_nanoseconds_and_reject_leap_seconds() {
+    let wire = |revision| {
+        json!({
+            "id": 84,
+            "accountId": 42,
+            "contractId": "CON.F.US.MNQ.M26",
+            "creationTimestamp": "2016-12-31T23:59:58Z",
+            "updateTimestamp": revision,
+            "status": 1,
+            "type": 1,
+            "side": 0,
+            "size": 2
+        })
+    };
+    let valid = "2016-12-31T23:59:59.123456789Z";
+    let order: Order = serde_json::from_value(wire(valid))
+        .unwrap_or_else(|error| panic!("ordinary order revision must decode: {error}"));
+    assert_eq!(order.update_timestamp.to_string(), valid);
+
+    let leap_second = "2016-12-31T23:59:60.123456789Z";
+    assert!(serde_json::from_value::<Order>(wire(leap_second)).is_err());
+    assert!(Timestamp::new(leap_second).is_err());
+}
+
+#[test]
 fn provider_models_reject_out_of_range_int32_values() {
     let above_i32 = i64::from(i32::MAX) + 1;
     let invalid_position = json!({

@@ -518,6 +518,8 @@ backoff, and publishes the cooldown to every clone. The two
 [exit reads](#optional-exit-reserve) publish the cooldown too but return the 429 at once, without
 backoff or retry; they return a transport failure or a server error at once as well. Missing or malformed `Retry-After` falls back to
 the configured rolling-window duration; hostile delays are capped at 24 hours.
+Applications can supply their UTC clock with `ClientBuilder::wall_clock` for absolute
+HTTP dates. After conversion to a delay, the cooldown uses monotonic time.
 
 ### Optional exit reserve
 
