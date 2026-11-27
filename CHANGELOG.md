@@ -19,6 +19,10 @@ first public release.
   jiff 1.0 to keep using them. Parsing, serialization and the validated types themselves are
   unchanged.
 
+### Changed
+
+- Raise the supported `jiff` 1.x minimum to 1.0.3.
+
 ## [8.1.0] - 2026-11-14
 
 ### Changed
