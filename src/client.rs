@@ -6,7 +6,7 @@
 use std::{
     fmt,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt as _;
@@ -68,6 +68,7 @@ pub struct Client {
     max_retries: u32,
     retry_initial: Duration,
     retry_max: Duration,
+    wall_clock: Arc<dyn Fn() -> jiff::Timestamp + Send + Sync>,
 }
 
 /// Invalidates the exact session admitted to a logout request unless the
@@ -1164,7 +1165,7 @@ impl Client {
         kind: RateLimitKind,
         headers: &header::HeaderMap,
     ) -> Duration {
-        let retry_after = parse_retry_after(headers, SystemTime::now())
+        let retry_after = parse_retry_after(headers, self.wall_clock.as_ref())
             .unwrap_or_else(|| self.rate_limits.limit(kind).window())
             .min(MAX_COOLDOWN);
         self.rate_limits.cool_down(kind, retry_after);
@@ -1248,6 +1249,7 @@ impl Clone for Client {
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
             retry_max: self.retry_max,
+            wall_clock: Arc::clone(&self.wall_clock),
         }
     }
 }
@@ -1335,6 +1337,7 @@ pub struct ClientBuilder {
     retry_initial: Duration,
     retry_max: Duration,
     rate_limits: Option<RateLimitConfig>,
+    wall_clock: Arc<dyn Fn() -> jiff::Timestamp + Send + Sync>,
 }
 
 impl ClientBuilder {
@@ -1350,6 +1353,7 @@ impl ClientBuilder {
             retry_initial: DEFAULT_RETRY_INITIAL,
             retry_max: DEFAULT_RETRY_MAX,
             rate_limits: Some(RateLimitConfig::default()),
+            wall_clock: Arc::new(jiff::Timestamp::now),
         }
     }
 
@@ -1418,6 +1422,18 @@ impl ClientBuilder {
     pub fn retry_delays(mut self, initial: Duration, maximum: Duration) -> Self {
         self.retry_initial = initial;
         self.retry_max = maximum;
+        self
+    }
+
+    /// Supplies the UTC clock for absolute HTTP `Retry-After` values.
+    ///
+    /// The default reads the system clock. Admission deadlines and relative
+    /// delays use Tokio's monotonic clock.
+    pub fn wall_clock(
+        mut self,
+        clock: impl Fn() -> jiff::Timestamp + Send + Sync + 'static,
+    ) -> Self {
+        self.wall_clock = Arc::new(clock);
         self
     }
 
@@ -1522,6 +1538,7 @@ impl ClientBuilder {
             max_retries: self.max_retries,
             retry_initial: self.retry_initial,
             retry_max: self.retry_max,
+            wall_clock: self.wall_clock,
         })
     }
 }
@@ -1620,15 +1637,23 @@ fn retry_delay(error: &Error, backoff: Duration) -> Duration {
     }
 }
 
-fn parse_retry_after(headers: &header::HeaderMap, now: SystemTime) -> Option<Duration> {
+fn parse_retry_after(
+    headers: &header::HeaderMap,
+    now: impl FnOnce() -> jiff::Timestamp,
+) -> Option<Duration> {
     let raw = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = raw.parse::<u64>() {
         return Some(Duration::from_secs(seconds).min(MAX_COOLDOWN));
     }
-    let deadline = httpdate::parse_http_date(raw).ok()?;
+    let deadline = httpdate::parse_http_date(raw)
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?;
+    let deadline = jiff::SignedDuration::try_from(deadline).ok()?;
+    let elapsed = now().duration_since(jiff::Timestamp::UNIX_EPOCH);
+    let remaining = deadline.checked_sub(elapsed)?;
     Some(
-        deadline
-            .duration_since(now)
+        Duration::try_from(remaining)
             .unwrap_or(Duration::ZERO)
             .min(MAX_COOLDOWN),
     )
@@ -1826,8 +1851,6 @@ struct ContractRequest<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
-
     use super::*;
 
     fn fixture_credentials() -> Credentials {
@@ -2055,7 +2078,7 @@ mod tests {
         let mut headers = header::HeaderMap::new();
         headers.insert(header::RETRY_AFTER, header::HeaderValue::from_static("45"));
         assert_eq!(
-            parse_retry_after(&headers, UNIX_EPOCH),
+            parse_retry_after(&headers, || panic!("relative delays do not read wall time")),
             Some(Duration::from_secs(45))
         );
 
@@ -2063,26 +2086,70 @@ mod tests {
             header::RETRY_AFTER,
             header::HeaderValue::from_static("18446744073709551615"),
         );
-        assert_eq!(parse_retry_after(&headers, UNIX_EPOCH), Some(MAX_COOLDOWN));
+        assert_eq!(
+            parse_retry_after(&headers, || jiff::Timestamp::UNIX_EPOCH),
+            Some(MAX_COOLDOWN)
+        );
     }
 
     #[test]
     fn retry_after_parses_http_dates_without_waiting_for_past_dates() {
-        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let future = now + Duration::from_secs(75);
+        let now = || {
+            "1994-11-06T08:48:02Z"
+                .parse()
+                .unwrap_or_else(|error| panic!("fixture timestamp must parse: {error}"))
+        };
         let mut headers = header::HeaderMap::new();
-        let future_header = header::HeaderValue::from_str(&httpdate::fmt_http_date(future))
-            .unwrap_or_else(|error| panic!("fixture header must be valid: {error}"));
-        headers.insert(header::RETRY_AFTER, future_header);
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("Sun, 06 Nov 1994 08:49:17 GMT"),
+        );
         assert_eq!(
             parse_retry_after(&headers, now),
             Some(Duration::from_secs(75))
         );
 
-        let past_header = header::HeaderValue::from_str(&httpdate::fmt_http_date(UNIX_EPOCH))
-            .unwrap_or_else(|error| panic!("fixture header must be valid: {error}"));
-        headers.insert(header::RETRY_AFTER, past_header);
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("Thu, 01 Jan 1970 00:00:00 GMT"),
+        );
         assert_eq!(parse_retry_after(&headers, now), Some(Duration::ZERO));
+
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("Fri, 31 Dec 9999 23:59:59 GMT"),
+        );
+        assert_eq!(parse_retry_after(&headers, now), Some(MAX_COOLDOWN));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_retry_after_blocks_admission_until_its_monotonic_deadline() {
+        let wall_time = "1994-11-06T08:49:36.123456789Z"
+            .parse()
+            .unwrap_or_else(|error| panic!("fixture timestamp must parse: {error}"));
+        let client = Client::builder(fixture_credentials())
+            .wall_clock(move || wall_time)
+            .build()
+            .unwrap_or_else(|error| panic!("fixture client must build: {error}"))
+            .clone();
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+        );
+        let kind = RateLimitKind::General;
+
+        assert_eq!(
+            client.apply_provider_cooldown(kind, &headers),
+            Duration::from_nanos(876_543_211)
+        );
+        tokio::time::advance(Duration::from_nanos(876_543_210)).await;
+        assert_eq!(
+            client.rate_limits.try_acquire(kind),
+            Err(Duration::from_nanos(1))
+        );
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert_eq!(client.rate_limits.try_acquire(kind), Ok(()));
     }
 
     #[test]
@@ -2092,7 +2159,12 @@ mod tests {
             header::RETRY_AFTER,
             header::HeaderValue::from_static("not-a-delay"),
         );
-        assert_eq!(parse_retry_after(&headers, UNIX_EPOCH), None);
+        assert_eq!(
+            parse_retry_after(&headers, || panic!(
+                "malformed delays do not read wall time"
+            )),
+            None
+        );
     }
 
     #[test]

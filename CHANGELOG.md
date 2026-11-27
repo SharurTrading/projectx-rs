@@ -16,8 +16,13 @@ first public release.
   [#140](https://github.com/SharurTrading/projectx-rs/pull/140). `Timestamp::as_jiff`,
   `ProviderDate::as_jiff` and the `From` conversions to and from `jiff::Timestamp` and
   `jiff::civil::Date` now use jiff 1.0 types, so a caller that stays on jiff 0.2 has to move to
-  jiff 1.0 to keep using them. Parsing, serialization and the validated types themselves are
-  unchanged.
+  jiff 1.0 to keep using them.
+
+### Changed
+
+- Raise the supported `jiff` 1.x minimum to 1.0.3.
+- Allow callers to supply a UTC clock for absolute HTTP `Retry-After` dates.
+- Reject leap-second timestamps to preserve distinct provider event instants.
 
 ## [8.1.0] - 2026-11-14
 
